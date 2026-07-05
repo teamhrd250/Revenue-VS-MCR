@@ -1,0 +1,2720 @@
+
+# app.py
+# Starcom Executive Platform (SEP) V4 — Executive Intelligence Edition
+# Streamlit dashboard based on Excel data model:
+# SEP_V4_Executive_Platform_Template.xlsx
+
+import os
+from io import BytesIO
+from typing import Dict, Optional, Tuple, List
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+
+
+# =========================
+# APP CONFIG
+# =========================
+st.set_page_config(
+    page_title="Starcom Executive Platform (SEP) V4",
+    page_icon="📊",
+    layout="wide",
+)
+
+DEFAULT_FILE = os.path.join(
+    "data",
+    "SEP_V4_Executive_Platform_Template.xlsx",
+)
+
+REQUIRED_SHEETS = [
+    "PARAMETERS",
+    "TARGETS",
+    "FJA_MAPPING",
+    "DIM_DEPARTMENT",
+    "REVENUE_YR",
+    "HEADCOUNT_YR",
+    "PAYROLL_YR",
+]
+
+OPTIONAL_SHEETS = [
+    "DIM_EMPLOYEE",
+    "REVENUE_BY_DEPT",
+    "HC_MOVEMENT",
+    "PROJECT_MARGIN",
+    "CAPACITY_INDICATOR",
+    "CALENDAR",
+    "EXEC_SUMMARY",
+]
+
+DEFAULT_MCR_BANDS = {
+    "ultra_max": 0.05,
+    "healthy_min": 0.05,
+    "healthy_max": 0.07,
+    "watch_max": 0.09,
+    "pressure_max": 0.14,
+    "critical_min": 0.14,
+}
+
+DEFAULT_GM_BANDS = {
+    "strong_min": 0.35,
+    "healthy_min": 0.25,
+    "watch_min": 0.15,
+    "pressure_min": 0.10,
+    "critical_max": 0.10,
+}
+
+TONE_COLOR = {
+    "success": "#22c55e",
+    "info": "#3b82f6",
+    "warning": "#f59e0b",
+    "error": "#ef4444",
+    "neutral": "#64748b",
+}
+
+
+def _find_logo_path() -> str:
+    """Cari logo perusahaan untuk header kanan atas.
+
+    Simpan salah satu nama file berikut di GitHub:
+    - assets/logo_company.png
+    - assets/logo_company.jpg
+    - assets/company_logo.png
+    - logo_company.png
+    """
+    candidates = [
+        os.path.join("assets", "logo_company.png"),
+        os.path.join("assets", "logo_company.jpg"),
+        os.path.join("assets", "logo_company.jpeg"),
+        os.path.join("assets", "company_logo.png"),
+        os.path.join("assets", "company_logo.jpg"),
+        os.path.join("assets", "company_logo.jpeg"),
+        "logo_company.png",
+        "logo_company.jpg",
+        "company_logo.png",
+        "company_logo.jpg",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return ""
+
+
+def _image_to_base64(path: str) -> Tuple[str, str]:
+    import base64
+    import mimetypes
+    mime, _ = mimetypes.guess_type(path)
+    mime = mime or "image/png"
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    return mime, b64
+
+
+def render_top_header() -> None:
+    """Header dengan logo di kanan atas."""
+    logo_path = _find_logo_path()
+    col_title, col_logo = st.columns([6, 1.4])
+
+    with col_title:
+        st.markdown(
+            """
+            <div style="padding:4px 0 10px 0;">
+                <div style="font-size:36px; font-weight:800; line-height:1.1;">Starcom Executive Platform (SEP) V4</div>
+                <div style="font-size:15px; color:#64748b; margin-top:6px;">Executive Intelligence Edition - workforce productivity, revenue leverage, MCR, capacity risk, and board decision support.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_logo:
+        if logo_path:
+            mime, b64 = _image_to_base64(logo_path)
+            st.markdown(
+                f"""
+                <div style="text-align:right; padding-top:2px;">
+                    <img src="data:{mime};base64,{b64}"
+                         style="max-width:150px; max-height:70px; object-fit:contain;" />
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """
+                <div style="text-align:right; padding-top:10px; color:#94a3b8; font-size:12px;">
+                    Logo belum ditemukan<br>
+                    <span style="font-size:11px;">assets/logo_company.png</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+
+# =========================
+# UTILITIES
+# =========================
+def _money(x, currency: str = "IDR") -> str:
+    try:
+        if x is None or pd.isna(x):
+            return "-"
+        x = float(x)
+        if abs(x) >= 1_000_000_000:
+            return f"{currency} {x/1_000_000_000:,.1f}B".replace(",", ".")
+        if abs(x) >= 1_000_000:
+            return f"{currency} {x/1_000_000:,.1f}M".replace(",", ".")
+        return f"{currency} {x:,.0f}".replace(",", ".")
+    except Exception:
+        return "-"
+
+
+def _num(x) -> str:
+    try:
+        if x is None or pd.isna(x):
+            return "-"
+        return f"{float(x):,.1f}".replace(",", ".")
+    except Exception:
+        return "-"
+
+
+def _pct(x) -> str:
+    try:
+        if x is None or pd.isna(x):
+            return "-"
+        return f"{float(x)*100:.1f}%"
+    except Exception:
+        return "-"
+
+
+def _pp(x) -> str:
+    try:
+        if x is None or pd.isna(x):
+            return "-"
+        return f"{float(x)*100:+.1f} pp"
+    except Exception:
+        return "-"
+
+
+def _safe_float(x):
+    try:
+        if x is None or pd.isna(x):
+            return np.nan
+        return float(x)
+    except Exception:
+        return np.nan
+
+
+def _safe_str(x) -> str:
+    if x is None or pd.isna(x):
+        return ""
+    return str(x).strip()
+
+
+def load_targets(targets: pd.DataFrame) -> Dict[str, float]:
+    out = {}
+    if targets is None or targets.empty:
+        return out
+    if not {"KPI", "Target_Value"}.issubset(set(targets.columns)):
+        return out
+    for _, row in targets.iterrows():
+        k = _safe_str(row.get("KPI"))
+        v = row.get("Target_Value")
+        try:
+            out[k] = float(v)
+        except Exception:
+            pass
+    return out
+
+
+def get_target(targets: Dict[str, float], key: str, default: float) -> float:
+    return float(targets.get(key, default))
+
+
+def build_params(params: pd.DataFrame) -> Dict[str, str]:
+    out = {}
+    if params is None or params.empty:
+        return out
+    if not {"Parameter", "Value"}.issubset(set(params.columns)):
+        return out
+    for _, row in params.iterrows():
+        k = _safe_str(row.get("Parameter"))
+        v = _safe_str(row.get("Value"))
+        if k:
+            out[k] = v
+    return out
+
+
+def build_calendar(calendar: Optional[pd.DataFrame], years: Optional[List[int]] = None) -> pd.DataFrame:
+    """Build FY/YTD calendar.
+
+    Required columns if provided:
+    Year, Months_Closed, Period_Type, Period_Label, Annualization_Factor, Data_Confidence
+    """
+    if calendar is None or calendar.empty or "Year" not in calendar.columns:
+        years = years or []
+        return pd.DataFrame({
+            "Year": years,
+            "Months_Closed": [12 for _ in years],
+            "Period_Type": ["FY" for _ in years],
+            "Period_Label": [f"FY {y}" for y in years],
+            "Annualization_Factor": [1.0 for _ in years],
+            "Data_Confidence": ["High" for _ in years],
+        })
+
+    cal = calendar.copy()
+    cal["Year"] = pd.to_numeric(cal["Year"], errors="coerce").astype("Int64")
+    cal["Months_Closed"] = pd.to_numeric(cal.get("Months_Closed"), errors="coerce").fillna(12).clip(lower=1, upper=12)
+    if "Period_Type" not in cal.columns:
+        cal["Period_Type"] = np.where(cal["Months_Closed"] < 12, "YTD", "FY")
+    if "Period_Label" not in cal.columns:
+        cal["Period_Label"] = cal.apply(lambda r: f"{r['Period_Type']} {int(r['Year'])}", axis=1)
+    if "Annualization_Factor" not in cal.columns:
+        cal["Annualization_Factor"] = 12 / cal["Months_Closed"]
+    else:
+        cal["Annualization_Factor"] = pd.to_numeric(cal["Annualization_Factor"], errors="coerce")
+        cal["Annualization_Factor"] = cal["Annualization_Factor"].fillna(12 / cal["Months_Closed"])
+    if "Data_Confidence" not in cal.columns:
+        cal["Data_Confidence"] = np.where(cal["Months_Closed"] >= 12, "High", np.where(cal["Months_Closed"] >= 6, "Medium", "Low"))
+
+    cal = cal.dropna(subset=["Year"]).copy()
+    cal["Year"] = cal["Year"].astype(int)
+    return cal[["Year", "Months_Closed", "Period_Type", "Period_Label", "Annualization_Factor", "Data_Confidence"]]
+
+
+def get_calendar_info(calendar: pd.DataFrame, year: int) -> Dict[str, object]:
+    if calendar is None or calendar.empty or "Year" not in calendar.columns:
+        return {"Months_Closed": 12, "Period_Type": "FY", "Period_Label": f"FY {year}", "Annualization_Factor": 1.0, "Data_Confidence": "High"}
+    row = calendar[calendar["Year"] == int(year)]
+    if row.empty:
+        return {"Months_Closed": 12, "Period_Type": "FY", "Period_Label": f"FY {year}", "Annualization_Factor": 1.0, "Data_Confidence": "High"}
+    r = row.iloc[0]
+    return {
+        "Months_Closed": int(r.get("Months_Closed", 12)),
+        "Period_Type": str(r.get("Period_Type", "FY")),
+        "Period_Label": str(r.get("Period_Label", f"FY {year}")),
+        "Annualization_Factor": float(r.get("Annualization_Factor", 1.0)),
+        "Data_Confidence": str(r.get("Data_Confidence", "High")),
+    }
+
+
+@st.cache_data(show_spinner=False)
+def load_workbook(file_bytes: Optional[bytes], default_path: str) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
+    warnings: List[str] = []
+    try:
+        if file_bytes:
+            xls = pd.ExcelFile(BytesIO(file_bytes))
+        else:
+            if not os.path.exists(default_path):
+                return {}, [f"File default tidak ditemukan: {default_path}. Upload file Excel terlebih dahulu."]
+            xls = pd.ExcelFile(default_path)
+    except Exception as e:
+        return {}, [f"Excel tidak bisa dibaca: {type(e).__name__}: {e}"]
+
+    sheets: Dict[str, pd.DataFrame] = {}
+    for sh in REQUIRED_SHEETS + OPTIONAL_SHEETS:
+        if sh in xls.sheet_names:
+            try:
+                df = pd.read_excel(xls, sheet_name=sh)
+                df.columns = [str(c).strip() for c in df.columns]
+                sheets[sh] = df
+            except Exception as e:
+                warnings.append(f"Sheet {sh} gagal dibaca: {e}")
+
+    missing = [s for s in REQUIRED_SHEETS if s not in sheets]
+    if missing:
+        warnings.append("Sheet wajib belum ada: " + ", ".join(missing))
+
+    return sheets, warnings
+
+
+def clean_and_calc(sheets: Dict[str, pd.DataFrame], analysis_mode: str = "Actual") -> Dict[str, pd.DataFrame]:
+    dim = sheets["DIM_DEPARTMENT"].copy()
+    fja_map = sheets["FJA_MAPPING"].copy()
+    rev = sheets["REVENUE_YR"].copy()
+    hc = sheets["HEADCOUNT_YR"].copy()
+    pay = sheets["PAYROLL_YR"].copy()
+
+    # Calendar/YTD awareness.
+    raw_years = []
+    for _df in [rev, hc, pay]:
+        if "Year" in _df.columns:
+            raw_years.extend(pd.to_numeric(_df["Year"], errors="coerce").dropna().astype(int).tolist())
+    calendar = build_calendar(sheets.get("CALENDAR", pd.DataFrame()), sorted(set(raw_years)))
+
+    # Robust mode factors. Do not trust stale Annualization_Factor values in Excel.
+    calendar["Months_Closed"] = pd.to_numeric(calendar["Months_Closed"], errors="coerce").fillna(12).clip(lower=1, upper=12)
+    annualization_map = dict(zip(calendar["Year"].astype(int), (12 / calendar["Months_Closed"]).astype(float)))
+
+    ytd_rows = calendar[calendar["Months_Closed"] < 12]
+    comparable_months = int(ytd_rows["Months_Closed"].max()) if not ytd_rows.empty else 12
+    ytd_comparable_map = {
+        int(r["Year"]): float(comparable_months / float(r["Months_Closed"]))
+        for _, r in calendar.iterrows()
+    }
+
+    if analysis_mode == "Annual Projection":
+        amount_factor_map = annualization_map
+        revenue_factor_map = annualization_map
+        cost_factor_map = annualization_map
+        mode_note = "Annual Projection: YTD disetahunkan dengan 12 / Months_Closed. Jika 4 bulan maka x3; jika 6 bulan maka x2."
+    elif analysis_mode == "YTD Comparable":
+        amount_factor_map = ytd_comparable_map
+        revenue_factor_map = ytd_comparable_map
+        cost_factor_map = ytd_comparable_map
+        mode_note = f"YTD Comparable: semua tahun dikonversi ke basis {comparable_months} bulan agar FY sebelumnya apple-to-apple dengan YTD berjalan."
+    elif analysis_mode == "MCR Focus":
+        amount_factor_map = {int(r["Year"]): 1.0 for _, r in calendar.iterrows()}
+        revenue_factor_map = annualization_map
+        cost_factor_map = {int(r["Year"]): 1.0 for _, r in calendar.iterrows()}
+        mode_note = "MCR Focus: revenue diproyeksikan full-year, tetapi manpower cost dan COGS tetap actual/YTD. Mode ini membuat MCR dan Gross Margin berubah sebagai stress-test."
+    else:
+        amount_factor_map = {int(r["Year"]): 1.0 for _, r in calendar.iterrows()}
+        revenue_factor_map = amount_factor_map
+        cost_factor_map = amount_factor_map
+        mode_note = "Actual: angka sesuai input Excel."
+
+    for c in ["Dept_ID", "Dept_Name", "Function_Group", "Revenue_Driver_Flag", "FJA_Category_Override"]:
+        if c in dim.columns:
+            dim[c] = dim[c].astype(str).str.strip()
+    dim = dim[dim["Dept_ID"].astype(str).str.strip().ne("")].copy()
+
+    if "FJA_Category_Override" not in dim.columns:
+        dim["FJA_Category_Override"] = ""
+
+    if not fja_map.empty and {"Function_Group", "FJA_Category"}.issubset(fja_map.columns):
+        fja_lookup = dict(zip(fja_map["Function_Group"].astype(str).str.strip(), fja_map["FJA_Category"].astype(str).str.strip()))
+    else:
+        fja_lookup = {
+            "Sales": "Revenue Generator",
+            "Operations/Project": "Revenue Enabler",
+            "Engineering": "Revenue Enabler",
+            "Support": "Support Function",
+            "Management": "Governance / Management",
+        }
+
+    dim["FJA_Category"] = np.where(
+        dim["FJA_Category_Override"].astype(str).str.strip().ne(""),
+        dim["FJA_Category_Override"].astype(str).str.strip(),
+        dim["Function_Group"].map(fja_lookup).fillna("Unmapped")
+    )
+
+    rev["Year"] = pd.to_numeric(rev["Year"], errors="coerce").astype("Int64")
+    for c in ["Revenue_Recognized", "COGS_Direct"]:
+        if c in rev.columns:
+            rev[c] = pd.to_numeric(rev[c], errors="coerce").fillna(0.0)
+    if "COGS_Direct" not in rev.columns:
+        rev["COGS_Direct"] = 0.0
+
+    rev["Revenue_Actual"] = rev["Revenue_Recognized"]
+    rev["COGS_Actual"] = rev["COGS_Direct"]
+    if analysis_mode in ["Annual Projection", "YTD Comparable", "MCR Focus"]:
+        _rev_factor = rev["Year"].astype("float").map(revenue_factor_map).fillna(1.0)
+        _cogs_factor = rev["Year"].astype("float").map(cost_factor_map).fillna(1.0)
+        rev["Revenue_Recognized"] = rev["Revenue_Recognized"] * _rev_factor
+        rev["COGS_Direct"] = rev["COGS_Direct"] * _cogs_factor
+
+    hc["Year"] = pd.to_numeric(hc["Year"], errors="coerce").astype("Int64")
+    hc["Avg_Headcount"] = pd.to_numeric(hc.get("Avg_Headcount"), errors="coerce").fillna(0.0)
+    if "Avg_FTE" in hc.columns:
+        hc["Avg_FTE"] = pd.to_numeric(hc["Avg_FTE"], errors="coerce")
+    if "New_Hires" in hc.columns:
+        hc["New_Hires"] = pd.to_numeric(hc["New_Hires"], errors="coerce").fillna(0.0)
+    if "Exits" in hc.columns:
+        hc["Exits"] = pd.to_numeric(hc["Exits"], errors="coerce").fillna(0.0)
+
+    pay["Year"] = pd.to_numeric(pay["Year"], errors="coerce").astype("Int64")
+    cost_cols = ["Payroll_Gross", "Overtime", "Bonus", "Benefits", "Employer_Tax", "Total_Manpower_Cost"]
+    for c in cost_cols:
+        if c in pay.columns:
+            pay[c] = pd.to_numeric(pay[c], errors="coerce").fillna(0.0)
+    if "Total_Manpower_Cost" not in pay.columns:
+        comp_cols = [c for c in ["Payroll_Gross", "Overtime", "Bonus", "Benefits", "Employer_Tax"] if c in pay.columns]
+        pay["Total_Manpower_Cost"] = pay[comp_cols].sum(axis=1) if comp_cols else 0.0
+
+    for _c in ["Payroll_Gross", "Overtime", "Bonus", "Benefits", "Employer_Tax", "Total_Manpower_Cost"]:
+        if _c in pay.columns:
+            pay[f"{_c}_Actual"] = pay[_c]
+    if analysis_mode in ["Annual Projection", "YTD Comparable"]:
+        _pay_factor = pay["Year"].astype("float").map(cost_factor_map).fillna(1.0)
+        for _c in ["Payroll_Gross", "Overtime", "Bonus", "Benefits", "Employer_Tax", "Total_Manpower_Cost"]:
+            if _c in pay.columns:
+                pay[_c] = pay[_c] * _pay_factor
+    # In MCR Focus, manpower cost intentionally remains actual/YTD.
+
+    dim_small = dim[["Dept_ID", "Dept_Name", "Function_Group", "Revenue_Driver_Flag", "FJA_Category"]].copy()
+
+    hc2 = hc.merge(dim_small, on="Dept_ID", how="left")
+    pay2 = pay.merge(dim_small, on="Dept_ID", how="left")
+
+    # Yearly KPI
+    rev_tot = rev.groupby("Year", as_index=False).agg(
+        Total_Revenue=("Revenue_Recognized", "sum"),
+        Total_COGS=("COGS_Direct", "sum"),
+    )
+    rev_tot["Gross_Profit"] = rev_tot["Total_Revenue"] - rev_tot["Total_COGS"]
+    rev_tot["Gross_Margin_Pct"] = np.where(rev_tot["Total_Revenue"] > 0, rev_tot["Gross_Profit"] / rev_tot["Total_Revenue"], np.nan)
+
+    hc_tot = hc2.groupby("Year", as_index=False).agg(
+        Total_Headcount=("Avg_Headcount", "sum"),
+        New_Hires=("New_Hires", "sum") if "New_Hires" in hc2.columns else ("Avg_Headcount", lambda x: np.nan),
+        Exits=("Exits", "sum") if "Exits" in hc2.columns else ("Avg_Headcount", lambda x: np.nan),
+    )
+
+    pay_tot = pay2.groupby("Year", as_index=False).agg(
+        Total_Manpower_Cost=("Total_Manpower_Cost", "sum")
+    )
+
+    yr = rev_tot.merge(hc_tot, on="Year", how="outer").merge(pay_tot, on="Year", how="outer").sort_values("Year")
+    yr["RPE"] = np.where(yr["Total_Headcount"] > 0, yr["Total_Revenue"] / yr["Total_Headcount"], np.nan)
+    yr["Cost_per_HC"] = np.where(yr["Total_Headcount"] > 0, yr["Total_Manpower_Cost"] / yr["Total_Headcount"], np.nan)
+    yr["MCR_Pct"] = np.where(yr["Total_Revenue"] > 0, yr["Total_Manpower_Cost"] / yr["Total_Revenue"], np.nan)
+    yr["Revenue_per_Payroll"] = np.where(yr["Total_Manpower_Cost"] > 0, yr["Total_Revenue"] / yr["Total_Manpower_Cost"], np.nan)
+
+    for col, new_col in [
+        ("Total_Revenue", "Revenue_YoY"),
+        ("Total_Headcount", "Headcount_YoY"),
+        ("Total_Manpower_Cost", "ManpowerCost_YoY"),
+        ("RPE", "RPE_YoY"),
+        ("Cost_per_HC", "Cost_per_HC_YoY"),
+        ("Gross_Margin_Pct", "GrossMargin_Delta"),
+        ("MCR_Pct", "MCR_Delta"),
+    ]:
+        if col in yr.columns:
+            if "Delta" in new_col:
+                yr[new_col] = yr[col].diff()
+            else:
+                yr[new_col] = yr[col].pct_change()
+
+    # Function/FJA breakdown
+    hc_fg = hc2.groupby(["Year", "Function_Group", "FJA_Category"], dropna=False, as_index=False).agg(Headcount=("Avg_Headcount", "sum"))
+    pay_fg = pay2.groupby(["Year", "Function_Group", "FJA_Category"], dropna=False, as_index=False).agg(Manpower_Cost=("Total_Manpower_Cost", "sum"))
+    fg = hc_fg.merge(pay_fg, on=["Year", "Function_Group", "FJA_Category"], how="outer")
+    fg["Cost_per_HC"] = np.where(fg["Headcount"] > 0, fg["Manpower_Cost"] / fg["Headcount"], np.nan)
+
+    fja = fg.groupby(["Year", "FJA_Category"], as_index=False).agg(
+        Headcount=("Headcount", "sum"),
+        Manpower_Cost=("Manpower_Cost", "sum"),
+    )
+    fja["Cost_Share"] = fja["Manpower_Cost"] / fja.groupby("Year")["Manpower_Cost"].transform("sum")
+    fja["HC_Share"] = fja["Headcount"] / fja.groupby("Year")["Headcount"].transform("sum")
+
+    # Department view
+    hcd = hc2.groupby(["Year", "Dept_ID", "Dept_Name", "Function_Group", "FJA_Category"], dropna=False, as_index=False).agg(Headcount=("Avg_Headcount", "sum"))
+    payd = pay2.groupby(["Year", "Dept_ID", "Dept_Name", "Function_Group", "FJA_Category"], dropna=False, as_index=False).agg(Manpower_Cost=("Total_Manpower_Cost", "sum"))
+    dept = hcd.merge(payd, on=["Year", "Dept_ID", "Dept_Name", "Function_Group", "FJA_Category"], how="outer")
+    dept["Cost_per_HC"] = np.where(dept["Headcount"] > 0, dept["Manpower_Cost"] / dept["Headcount"], np.nan)
+
+    if "REVENUE_BY_DEPT" in sheets and not sheets["REVENUE_BY_DEPT"].empty:
+        rd = sheets["REVENUE_BY_DEPT"].copy()
+        rd["Year"] = pd.to_numeric(rd["Year"], errors="coerce").astype("Int64")
+        rd["Revenue_Recognized"] = pd.to_numeric(rd["Revenue_Recognized"], errors="coerce").fillna(0.0)
+        rd["Revenue_Actual"] = rd["Revenue_Recognized"]
+        if analysis_mode in ["Annual Projection", "YTD Comparable", "MCR Focus"]:
+            _rd_factor = rd["Year"].astype("float").map(revenue_factor_map).fillna(1.0)
+            rd["Revenue_Recognized"] = rd["Revenue_Recognized"] * _rd_factor
+        rd_tot = rd.groupby(["Year", "Dept_ID"], as_index=False).agg(Dept_Revenue=("Revenue_Recognized", "sum"))
+        dept = dept.merge(rd_tot, on=["Year", "Dept_ID"], how="left")
+    else:
+        dept["Dept_Revenue"] = np.nan
+
+    dept["Dept_RPE"] = np.where(dept["Headcount"] > 0, dept["Dept_Revenue"] / dept["Headcount"], np.nan)
+    dept["Revenue_per_Cost"] = np.where(dept["Manpower_Cost"] > 0, dept["Dept_Revenue"] / dept["Manpower_Cost"], np.nan)
+
+    # Capacity indicators
+    if "CAPACITY_INDICATOR" in sheets and not sheets["CAPACITY_INDICATOR"].empty:
+        cap = sheets["CAPACITY_INDICATOR"].copy()
+        cap["Year"] = pd.to_numeric(cap["Year"], errors="coerce").astype("Int64")
+        for c in ["Avg_Utilization_Pct", "Overtime_Hours", "Backlog_Count", "SLA_Breach_Count", "Incident_Count", "Turnover_Count"]:
+            if c in cap.columns:
+                cap[c] = pd.to_numeric(cap[c], errors="coerce").fillna(0.0)
+    else:
+        cap = pd.DataFrame()
+
+    # Project margin
+    if "PROJECT_MARGIN" in sheets and not sheets["PROJECT_MARGIN"].empty:
+        pm = sheets["PROJECT_MARGIN"].copy()
+        pm["Year"] = pd.to_numeric(pm["Year"], errors="coerce").astype("Int64")
+        for c in ["Revenue", "COGS", "Gross_Profit"]:
+            if c in pm.columns:
+                pm[c] = pd.to_numeric(pm[c], errors="coerce").fillna(0.0)
+        if analysis_mode in ["Annual Projection", "YTD Comparable", "MCR Focus"]:
+            _pm_rev_factor = pm["Year"].astype("float").map(revenue_factor_map).fillna(1.0)
+            _pm_cost_factor = pm["Year"].astype("float").map(cost_factor_map).fillna(1.0)
+            if "Revenue" in pm.columns:
+                pm["Revenue"] = pm["Revenue"] * _pm_rev_factor
+            if "COGS" in pm.columns:
+                pm["COGS"] = pm["COGS"] * _pm_cost_factor
+            if "Gross_Profit" in pm.columns:
+                pm["Gross_Profit"] = pm["Revenue"] - pm.get("COGS", 0)
+        if "Gross_Profit" not in pm.columns:
+            pm["Gross_Profit"] = pm["Revenue"] - pm["COGS"]
+        pm["Gross_Margin_Pct"] = np.where(pm["Revenue"] > 0, pm["Gross_Profit"] / pm["Revenue"], np.nan)
+    else:
+        pm = pd.DataFrame()
+
+    return {
+        "params": sheets.get("PARAMETERS", pd.DataFrame()),
+        "targets": sheets.get("TARGETS", pd.DataFrame()),
+        "dim": dim,
+        "fja_map": fja_map,
+        "yearly": yr,
+        "fg": fg,
+        "fja": fja,
+        "dept": dept,
+        "capacity": cap,
+        "project_margin": pm,
+        "calendar": calendar,
+        "analysis_mode": analysis_mode,
+        "mode_note": mode_note,
+        "comparable_months": comparable_months,
+    }
+
+
+# =========================
+# DECISION ENGINES
+# =========================
+def business_posture(rev_g, hc_g, rpe_g, mcr, targets: Dict[str, float]) -> Dict[str, str]:
+    rev_min = get_target(targets, "Revenue_Growth_Min", 0.20)
+    rpe_min = get_target(targets, "RPE_Growth_Min", 0.15)
+    hc_max = get_target(targets, "Headcount_Growth_Max_High_Leverage", 0.10)
+    mcr_watch = get_target(targets, "MCR_Watch_Max", 0.09)
+
+    state = "BALANCED"
+    tone = "info"
+    hint = "Pertumbuhan, kapasitas, dan people-cost relatif seimbang."
+
+    if pd.notna(rev_g) and rev_g <= 0:
+        state, tone, hint = "DEFENSIVE", "error", "Revenue melemah; prioritas proteksi margin, cash, dan fungsi kritikal."
+    elif pd.notna(rev_g) and pd.notna(rpe_g) and pd.notna(hc_g) and pd.notna(mcr) and rev_g >= rev_min and rpe_g >= rpe_min and hc_g <= hc_max and mcr <= mcr_watch:
+        state, tone, hint = "HIGH_LEVERAGE", "success", "Revenue & RPE tumbuh kuat dengan HC terkendali dan MCR sehat/watch rendah."
+    elif pd.notna(rev_g) and pd.notna(hc_g) and rev_g > 0.10 and hc_g > 0.15 and (pd.isna(rpe_g) or rpe_g <= 0):
+        state, tone, hint = "CAPACITY_RISK", "warning", "Pertumbuhan mulai dibeli dengan tambahan kapasitas; validasi produktivitas diperlukan."
+    elif pd.notna(mcr) and mcr > mcr_watch:
+        state, tone, hint = "COST_PRESSURE", "warning", "People-cost mulai menekan; fokus pada disiplin biaya dan unit economics."
+
+    return {"state": state, "tone": tone, "hint": hint}
+
+
+def margin_quality(gm, targets: Dict[str, float]) -> Dict[str, str]:
+    strong = get_target(targets, "Gross_Margin_Strong_Min", 0.35)
+    healthy = get_target(targets, "Gross_Margin_Healthy_Min", 0.25)
+    watch = get_target(targets, "Gross_Margin_Watch_Min", 0.15)
+    pressure = get_target(targets, "Gross_Margin_Pressure_Min", 0.10)
+
+    if pd.isna(gm):
+        return {"state": "UNKNOWN", "tone": "info", "hint": "Gross Margin belum tersedia."}
+    if gm >= strong:
+        return {"state": "STRONG", "tone": "success", "hint": "Margin sangat kuat; ruang profitabilitas tinggi."}
+    if gm >= healthy:
+        return {"state": "HEALTHY", "tone": "success", "hint": "Margin sehat; tetap jaga pricing, delivery cost, dan project mix."}
+    if gm >= watch:
+        return {"state": "WATCH", "tone": "warning", "hint": "Margin perlu dipantau; validasi pricing, COGS, scope creep, dan biaya delivery."}
+    if gm >= pressure:
+        return {"state": "PRESSURE", "tone": "warning", "hint": "Margin mulai tertekan; perlu review profitabilitas proyek/layanan."}
+    return {"state": "CRITICAL", "tone": "error", "hint": "Margin kritikal; perlu tindakan korektif segera."}
+
+
+def mcr_health(mcr, targets: Dict[str, float]) -> Dict[str, str]:
+    ultra = get_target(targets, "MCR_Ultra_Efficiency_Max", 0.05)
+    healthy_max = get_target(targets, "MCR_Healthy_Max", 0.07)
+    watch_max = get_target(targets, "MCR_Watch_Max", 0.09)
+    pressure_max = get_target(targets, "MCR_Cost_Pressure_Max", 0.14)
+
+    if pd.isna(mcr):
+        return {"state": "UNKNOWN", "tone": "info", "hint": "MCR belum tersedia."}
+    if mcr < ultra:
+        return {"state": "ULTRA_EFFICIENCY", "tone": "warning", "hint": "Sangat efisien; perlu validasi kapasitas dan sustainability."}
+    if mcr <= healthy_max:
+        return {"state": "HEALTHY", "tone": "success", "hint": "MCR berada di rentang sehat 5–7%."}
+    if mcr <= watch_max:
+        return {"state": "WATCH", "tone": "warning", "hint": "MCR mulai perlu dipantau agar tidak bergerak lebih cepat dari revenue."}
+    if mcr <= pressure_max:
+        return {"state": "COST_PRESSURE", "tone": "warning", "hint": "People-cost mulai menekan profitabilitas."}
+    return {"state": "CRITICAL", "tone": "error", "hint": "People-cost berada pada level kritikal."}
+
+
+def capacity_risk(latest: pd.Series, cap_df: pd.DataFrame, targets: Dict[str, float]) -> Dict[str, object]:
+    """Capacity Score Engine V2 - Board Edition.
+
+    Score range 0-100:
+    - Utilization: 25
+    - Overtime: 20
+    - Backlog: 20
+    - SLA Breach: 15
+    - Turnover: 10
+    - Critical Role Dependency: 10
+
+    Tidak berbenturan dengan TARGETS Excel karena engine ini membaca CAPACITY_INDICATOR,
+    sedangkan TARGETS tetap dipakai untuk Revenue, RPE, MCR, dan Margin Quality.
+    """
+    year = latest.get("Year")
+
+    score = 0
+    reasons = []
+    details = {
+        "avg_utilization": np.nan,
+        "max_utilization": np.nan,
+        "total_overtime": 0.0,
+        "total_backlog": 0.0,
+        "total_sla_breach": 0.0,
+        "total_turnover": 0.0,
+        "critical_dependency": "UNKNOWN",
+    }
+
+    if cap_df is None or cap_df.empty or pd.isna(year):
+        return {
+            "state": "LOW",
+            "tone": "success",
+            "score": 0,
+            "recommendation": "No Hiring Required",
+            "hint": "CAPACITY_INDICATOR belum tersedia; risk default LOW.",
+            "details": details,
+        }
+
+    c = cap_df[cap_df["Year"] == int(year)].copy()
+    if c.empty:
+        return {
+            "state": "LOW",
+            "tone": "success",
+            "score": 0,
+            "recommendation": "No Hiring Required",
+            "hint": "Data capacity untuk tahun terpilih belum tersedia; risk default LOW.",
+            "details": details,
+        }
+
+    util = pd.to_numeric(c.get("Avg_Utilization_Pct"), errors="coerce").fillna(0.0)
+    overtime = pd.to_numeric(c.get("Overtime_Hours"), errors="coerce").fillna(0.0)
+    backlog = pd.to_numeric(c.get("Backlog_Count"), errors="coerce").fillna(0.0)
+    sla = pd.to_numeric(c.get("SLA_Breach_Count"), errors="coerce").fillna(0.0)
+    turnover = pd.to_numeric(c.get("Turnover_Count"), errors="coerce").fillna(0.0)
+
+    avg_util = float(util.mean()) if len(util) else 0.0
+    max_util = float(util.max()) if len(util) else 0.0
+    total_overtime = float(overtime.sum())
+    total_backlog = float(backlog.sum())
+    total_sla = float(sla.sum())
+    total_turnover = float(turnover.sum())
+
+    # Critical role dependency: take highest severity found in the selected year.
+    dep_series = c.get("Critical_Role_Dependency", pd.Series(dtype=str)).astype(str).str.upper().str.strip()
+    dep_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+    dep_ranked = dep_series.map(dep_rank).fillna(0)
+    max_dep_rank = int(dep_ranked.max()) if len(dep_ranked) else 0
+    dep_value = {1: "LOW", 2: "MEDIUM", 3: "HIGH", 4: "CRITICAL"}.get(max_dep_rank, "UNKNOWN")
+
+    details.update({
+        "avg_utilization": avg_util,
+        "max_utilization": max_util,
+        "total_overtime": total_overtime,
+        "total_backlog": total_backlog,
+        "total_sla_breach": total_sla,
+        "total_turnover": total_turnover,
+        "critical_dependency": dep_value,
+    })
+
+    # Utilization score, max 25
+    # Use max utilization to detect bottleneck even if average still looks normal.
+    util_ref = max_util
+    if util_ref >= 0.90:
+        score += 25
+        reasons.append("Utilization >90% pada fungsi tertentu")
+    elif util_ref >= 0.85:
+        score += 18
+        reasons.append("Utilization 85-90% pada fungsi tertentu")
+    elif util_ref >= 0.75:
+        score += 10
+        reasons.append("Utilization 75-85% perlu dimonitor")
+
+    # Overtime score, max 20
+    if total_overtime > 400:
+        score += 20
+        reasons.append("Overtime >400 jam")
+    elif total_overtime > 250:
+        score += 15
+        reasons.append("Overtime 250-400 jam")
+    elif total_overtime > 100:
+        score += 8
+        reasons.append("Overtime 100-250 jam")
+
+    # Backlog score, max 20
+    if total_backlog >= 20:
+        score += 20
+        reasons.append("Backlog >=20")
+    elif total_backlog >= 10:
+        score += 12
+        reasons.append("Backlog 10-19")
+    elif total_backlog > 0:
+        score += 6
+        reasons.append("Backlog mulai muncul")
+
+    # SLA breach score, max 15
+    if total_sla >= 5:
+        score += 15
+        reasons.append("SLA breach >=5")
+    elif total_sla > 0:
+        score += 8
+        reasons.append("Terdapat SLA breach")
+
+    # Turnover score, max 10
+    if total_turnover >= 10:
+        score += 10
+        reasons.append("Turnover >=10")
+    elif total_turnover > 0:
+        score += 5
+        reasons.append("Ada turnover pada periode berjalan")
+
+    # Critical Role Dependency score, max 10
+    if dep_value in ["HIGH", "CRITICAL"]:
+        score += 10
+        reasons.append("Critical role dependency tinggi")
+    elif dep_value == "MEDIUM":
+        score += 5
+        reasons.append("Critical role dependency medium")
+
+    score = int(min(100, round(score)))
+
+    if score > 75:
+        state, tone, recommendation = "CRITICAL", "error", "Immediate Capacity Action Required"
+    elif score >= 56:
+        state, tone, recommendation = "HIGH", "warning", "Capacity Expansion Review"
+    elif score >= 31:
+        state, tone, recommendation = "MEDIUM", "warning", "Selective Hiring"
+    else:
+        state, tone, recommendation = "LOW", "success", "No Hiring Required"
+
+    return {
+        "state": state,
+        "tone": tone,
+        "score": score,
+        "recommendation": recommendation,
+        "hint": "; ".join(reasons) if reasons else "Tidak ada sinyal kapasitas besar.",
+        "details": details,
+    }
+
+
+def management_action(business_state: str, margin_state: str, mcr_state: str, cap_state: str) -> Tuple[str, List[str]]:
+    if business_state == "HIGH_LEVERAGE":
+        title = "Selective Scale-Up with Capacity Guardrail"
+        actions = [
+            "Pertahankan struktur headcount yang disiplin; hindari ekspansi massal.",
+            "Lakukan selective hiring hanya pada bottleneck revenue/delivery critical.",
+            "Perkuat succession planning, knowledge transfer, dan retention role kunci.",
+            "Monitor overtime, backlog, SLA/incident, dan turnover role kritikal secara bulanan.",
+        ]
+    elif business_state == "CAPACITY_RISK":
+        title = "Capacity Stabilization"
+        actions = [
+            "Validasi kebutuhan kapasitas per fungsi sebelum hiring lanjutan.",
+            "Evaluasi produktivitas per role/function dan perbaiki bottleneck delivery.",
+            "Prioritaskan automation/process improvement sebelum menambah fixed cost.",
+        ]
+    elif business_state == "COST_PRESSURE":
+        title = "People-Cost Control"
+        actions = [
+            "Perketat approval hiring berbasis ROI dan kebutuhan delivery.",
+            "Audit overtime, bonus, benefit, dan struktur manpower cost.",
+            "Review unit economics per project/service.",
+        ]
+    elif business_state == "DEFENSIVE":
+        title = "Margin & Cash Protection"
+        actions = [
+            "Freeze hiring non-critical dan review biaya tetap.",
+            "Lindungi fungsi kritikal yang menjaga revenue dan delivery.",
+            "Fokus pada cash discipline, margin recovery, dan project profitability.",
+        ]
+    else:
+        title = "Balanced Optimization"
+        actions = [
+            "Optimalkan struktur yang ada sebelum ekspansi baru.",
+            "Tambahkan kapasitas hanya pada bottleneck yang terbukti.",
+            "Jaga MCR, RPE, dan driver-support ratio secara triwulan.",
+        ]
+
+    if margin_state in ["WATCH", "PRESSURE", "CRITICAL"]:
+        actions.append("Lakukan margin quality review: pricing, COGS, scope creep, rework, dan delivery cost.")
+    if mcr_state in ["ULTRA_EFFICIENCY", "WATCH"]:
+        actions.append("Validasi sustainability MCR melalui workload, SLA, backlog, dan turnover.")
+    if cap_state in ["HIGH", "CRITICAL"]:
+        actions.append("Lakukan capacity risk review bulanan sampai risiko turun ke Medium/Low.")
+
+    return title, actions
+
+
+
+def _score_from_growth(value, strong=0.20, good=0.10, weak=0.00) -> int:
+    """Convert growth metric to 0-100 score."""
+    if pd.isna(value):
+        return 50
+    value = float(value)
+    if value >= strong:
+        return 100
+    if value >= good:
+        return 80
+    if value >= weak:
+        return 60
+    if value >= -0.10:
+        return 35
+    return 15
+
+
+def _score_from_margin_state(state: str) -> int:
+    return {
+        "STRONG": 100,
+        "HEALTHY": 85,
+        "WATCH": 60,
+        "PRESSURE": 35,
+        "CRITICAL": 10,
+        "UNKNOWN": 50,
+    }.get(state, 50)
+
+
+def _score_from_mcr_state(state: str) -> int:
+    return {
+        "HEALTHY": 95,
+        "WATCH": 75,
+        "ULTRA_EFFICIENCY": 70,
+        "COST_PRESSURE": 40,
+        "CRITICAL": 10,
+        "UNKNOWN": 50,
+    }.get(state, 50)
+
+
+def _score_from_capacity_state(state: str) -> int:
+    return {
+        "LOW": 100,
+        "MEDIUM": 75,
+        "HIGH": 40,
+        "CRITICAL": 10,
+    }.get(state, 50)
+
+
+def board_score_engine(row: pd.Series, targets: Dict[str, float], cap_state: str = "LOW") -> Dict[str, object]:
+    """Board Score Engine v3.
+
+    Weighted score:
+    - Revenue Growth 25%
+    - RPE Growth 25%
+    - Margin Quality 20%
+    - MCR Health 15%
+    - Capacity Risk 15%
+    """
+    rev_g = row.get("Revenue_YoY")
+    rpe_g = row.get("RPE_YoY")
+    gm = row.get("Gross_Margin_Pct")
+    mcr = row.get("MCR_Pct")
+
+    mq_state = margin_quality(gm, targets)["state"]
+    mh_state = mcr_health(mcr, targets)["state"]
+
+    components = {
+        "Revenue Growth": _score_from_growth(rev_g, strong=get_target(targets, "Revenue_Growth_Min", 0.20), good=0.10, weak=0.00),
+        "RPE Growth": _score_from_growth(rpe_g, strong=get_target(targets, "RPE_Growth_Min", 0.15), good=0.08, weak=0.00),
+        "Margin Quality": _score_from_margin_state(mq_state),
+        "MCR Health": _score_from_mcr_state(mh_state),
+        "Capacity Risk": _score_from_capacity_state(cap_state),
+    }
+    weights = {
+        "Revenue Growth": 0.25,
+        "RPE Growth": 0.25,
+        "Margin Quality": 0.20,
+        "MCR Health": 0.15,
+        "Capacity Risk": 0.15,
+    }
+    score = sum(components[k] * weights[k] for k in components)
+    score = int(round(score))
+
+    if score >= 85:
+        status, tone, icon = "GROWTH_READY", "success", "🟢"
+        label = "Growth Ready"
+    elif score >= 70:
+        status, tone, icon = "OPTIMIZE_GROWTH", "info", "🔵"
+        label = "Optimize Growth"
+    elif score >= 55:
+        status, tone, icon = "SELECTIVE_HIRING", "warning", "🟡"
+        label = "Selective Hiring"
+    elif score >= 40:
+        status, tone, icon = "CAPACITY_ALERT", "warning", "🟠"
+        label = "Capacity Alert"
+    else:
+        status, tone, icon = "DEFENSIVE_MODE", "error", "🔴"
+        label = "Defensive Mode"
+
+    return {
+        "score": score,
+        "status": status,
+        "label": label,
+        "tone": tone,
+        "icon": icon,
+        "components": components,
+        "weights": weights,
+        "margin_state": mq_state,
+        "mcr_state": mh_state,
+        "capacity_state": cap_state,
+    }
+
+
+def board_status_interpretation(bs: Dict[str, object], bp_state: str, mq_state: str, mh_state: str, cap_state: str) -> str:
+    label = bs.get("label", "Balanced")
+    if bs.get("status") == "GROWTH_READY":
+        return (
+            "Perusahaan berada pada posisi siap tumbuh. Revenue dan produktivitas relatif kuat, "
+            "struktur people-cost masih terkendali, dan risiko kapasitas belum menjadi hambatan utama. "
+            "Arah keputusan: scale-up selektif dengan tetap menjaga margin dan kualitas delivery."
+        )
+    if bs.get("status") == "OPTIMIZE_GROWTH":
+        return (
+            "Perusahaan memiliki momentum pertumbuhan, namun masih ada area optimasi pada margin, MCR, atau kapasitas. "
+            "Arah keputusan: pertahankan growth, perbaiki margin quality, dan lakukan hiring hanya pada fungsi yang terbukti menjadi bottleneck."
+        )
+    if bs.get("status") == "SELECTIVE_HIRING":
+        return (
+            "Pertumbuhan masih dapat dilanjutkan, tetapi kapasitas dan efisiensi perlu dikontrol lebih ketat. "
+            "Arah keputusan: selective hiring berbasis ROI, prioritas pada revenue generator/enabler, dan review utilisasi per fungsi."
+        )
+    if bs.get("status") == "CAPACITY_ALERT":
+        return (
+            "Ada sinyal bahwa kapasitas, MCR, atau kualitas margin mulai membatasi pertumbuhan. "
+            "Arah keputusan: audit workload, backlog, SLA, dan struktur biaya sebelum ekspansi lebih lanjut."
+        )
+    return (
+        "Perusahaan perlu masuk mode proteksi. Fokus utama bukan ekspansi, melainkan menjaga margin, cash, dan fungsi kritikal. "
+        "Arah keputusan: freeze hiring non-critical, review cost base, dan pulihkan profitabilitas."
+    )
+
+
+def board_action_v3(bs: Dict[str, object], bp_state: str, mq_state: str, mh_state: str, cap_state: str) -> List[str]:
+    status = bs.get("status")
+    if status == "GROWTH_READY":
+        actions = [
+            "Setujui scale-up selektif pada fungsi revenue generator dan revenue enabler yang terbukti mendukung pipeline/delivery.",
+            "Pertahankan MCR pada zona sehat; setiap tambahan HC wajib dikaitkan dengan revenue atau kapasitas delivery yang jelas.",
+            "Gunakan momentum growth untuk memperkuat role kritikal, succession plan, dan retention key talent.",
+            "Jaga Margin Quality agar tidak turun akibat pricing discount, scope creep, atau delivery cost."
+        ]
+    elif status == "OPTIMIZE_GROWTH":
+        actions = [
+            "Pertahankan struktur organisasi saat ini sambil memperbaiki margin quality dan revenue per employee.",
+            "Prioritaskan improvement pada project profitability, pricing discipline, dan cost-to-serve.",
+            "Tambahkan kapasitas hanya pada bottleneck yang terbukti dari backlog, SLA, atau utilisasi.",
+            "Monitor MCR dan RPE secara kuartalan sebagai guardrail pertumbuhan."
+        ]
+    elif status == "SELECTIVE_HIRING":
+        actions = [
+            "Lakukan hiring terbatas hanya untuk posisi kritikal yang memiliki dampak langsung pada revenue/delivery.",
+            "Validasi kebutuhan tambahan HC dengan workload, backlog, SLA, dan revenue pipeline.",
+            "Tahan penambahan fungsi support kecuali ada justifikasi governance/compliance yang kuat.",
+            "Perbaiki produktivitas melalui automation, SOP, dan redistribusi workload sebelum menambah fixed cost."
+        ]
+    elif status == "CAPACITY_ALERT":
+        actions = [
+            "Lakukan capacity review lintas fungsi: overtime, utilisasi, backlog, SLA breach, incident, dan turnover.",
+            "Evaluasi apakah efisiensi MCR berasal dari produktivitas sehat atau under-capacity.",
+            "Tunda ekspansi non-critical sampai bottleneck delivery dan margin pressure terkendali.",
+            "Susun recovery plan untuk fungsi dengan cost tinggi, productivity rendah, atau dependency tinggi."
+        ]
+    else:
+        actions = [
+            "Freeze hiring non-critical dan fokus pada fungsi yang menjaga revenue serta cash collection.",
+            "Review project profitability dan hentikan aktivitas dengan margin negatif atau tidak strategis.",
+            "Audit manpower cost, overtime, benefit, dan struktur organisasi.",
+            "Susun profit recovery plan dengan target margin, cost, dan cash yang terukur."
+        ]
+
+    if mq_state in ["WATCH", "PRESSURE", "CRITICAL"]:
+        actions.append("Tambahkan margin quality review khusus: pricing, COGS, scope creep, rework, dan delivery cost.")
+    if cap_state in ["HIGH", "CRITICAL"]:
+        actions.append("Wajibkan monthly capacity risk review sampai status turun minimal ke MEDIUM.")
+    if mh_state in ["ULTRA_EFFICIENCY"]:
+        actions.append("Validasi risiko under-capacity karena MCR terlalu rendah dapat menyembunyikan overload tim.")
+    return actions
+
+
+def board_status_card_html(bs: Dict[str, object], confidence: str, mq_state: str, mh_state: str, cap_state: str) -> str:
+    color = TONE_COLOR.get(bs.get("tone", "info"), "#64748b")
+    return f"""
+    <div style="
+        border:1px solid rgba(148,163,184,.35);
+        border-radius:22px;
+        padding:22px;
+        background:linear-gradient(135deg, rgba(15,23,42,.05), rgba(15,23,42,.01));
+        min-height:260px;">
+        <div style="font-size:12px; color:#64748b; text-transform:uppercase; letter-spacing:.10em;">Board Status</div>
+        <div style="font-size:34px; font-weight:900; margin-top:10px;">
+            {bs.get('icon','🔵')} {bs.get('label','Balanced')}
+        </div>
+        <div style="font-size:54px; font-weight:900; color:{color}; margin-top:8px;">
+            {bs.get('score',0)}/100
+        </div>
+        <div style="height:10px; background:#e5e7eb; border-radius:999px; margin-top:8px; overflow:hidden;">
+            <div style="height:10px; width:{bs.get('score',0)}%; background:{color}; border-radius:999px;"></div>
+        </div>
+        <div style="margin-top:16px; font-size:13px; color:#475569; line-height:1.8;">
+            Confidence: <b>{confidence}</b><br>
+            Margin Quality: <b>{mq_state}</b><br>
+            MCR Health: <b>{mh_state}</b><br>
+            Capacity Risk: <b>{cap_state}</b>
+        </div>
+    </div>
+    """
+
+
+def _tone_from_status(status: str) -> str:
+    status = str(status).upper()
+    if status in ["HIRE", "GROW", "GOOD", "LOW", "HEALTHY", "STRONG"]:
+        return "success"
+    if status in ["HOLD", "WATCH", "SELECTIVE", "MEDIUM", "BALANCED"]:
+        return "warning"
+    if status in ["FREEZE", "CUT", "HIGH", "CRITICAL", "DEFENSIVE"]:
+        return "error"
+    return "info"
+
+
+def build_management_insights(latest: pd.Series, prev: Optional[pd.Series], bp: Dict[str, str], mq: Dict[str, str], mh: Dict[str, str], cr: Dict[str, object], currency: str) -> List[Dict[str, str]]:
+    """Rule-based narrative engine for Board presentation."""
+    insights = []
+
+    rev_g = latest.get("Revenue_YoY")
+    hc_g = latest.get("Headcount_YoY")
+    rpe_g = latest.get("RPE_YoY")
+    mcr = latest.get("MCR_Pct")
+    gm = latest.get("Gross_Margin_Pct")
+
+    if pd.notna(rev_g) and pd.notna(hc_g):
+        if rev_g > hc_g:
+            insights.append({
+                "title": "Revenue grows faster than Headcount",
+                "status": "GOOD",
+                "why": "Pertumbuhan revenue lebih cepat dibanding pertumbuhan HC.",
+                "meaning": "Indikasi produktivitas organisasi membaik; growth tidak semata-mata dibeli dengan penambahan orang.",
+                "action": "Pertahankan disiplin hiring dan fokus pada fungsi yang langsung menopang revenue/delivery."
+            })
+        else:
+            insights.append({
+                "title": "Headcount grows faster than Revenue",
+                "status": "WATCH",
+                "why": "HC tumbuh lebih cepat dibanding revenue.",
+                "meaning": "Tambahan kapasitas belum sepenuhnya dikonversi menjadi revenue.",
+                "action": "Review hiring ROI, workload, dan revenue pipeline sebelum menambah HC baru."
+            })
+
+    if pd.notna(rev_g) and pd.notna(rpe_g):
+        if rev_g > 0 and rpe_g < 0:
+            insights.append({
+                "title": "Revenue rises but RPE declines",
+                "status": "WATCH",
+                "why": "Revenue naik, tetapi revenue per employee turun.",
+                "meaning": "Pertumbuhan kemungkinan berasal dari penambahan orang, bukan peningkatan produktivitas.",
+                "action": "Evaluasi utilisasi, role productivity, dan kontribusi per departemen."
+            })
+        elif rev_g > 0 and rpe_g > 0:
+            insights.append({
+                "title": "Revenue and RPE improve together",
+                "status": "GOOD",
+                "why": "Revenue dan RPE sama-sama tumbuh.",
+                "meaning": "Pertumbuhan relatif berkualitas dari sudut manpower productivity.",
+                "action": "Lanjutkan growth dengan guardrail MCR dan capacity risk."
+            })
+
+    if mh.get("state") == "ULTRA_EFFICIENCY" and cr.get("state") in ["HIGH", "CRITICAL"]:
+        insights.append({
+            "title": "Very low MCR but high capacity risk",
+            "status": "CRITICAL",
+            "why": "MCR terlihat sangat efisien, tetapi capacity risk tinggi.",
+            "meaning": "Efisiensi kemungkinan menyembunyikan overload, under-capacity, atau dependency pada role kritikal.",
+            "action": "Validasi overtime, backlog, SLA breach, turnover, dan workload per fungsi."
+        })
+
+    if mh.get("state") in ["COST_PRESSURE", "CRITICAL"]:
+        insights.append({
+            "title": "MCR pressure detected",
+            "status": "CRITICAL",
+            "why": f"MCR berada pada status {mh.get('state')}.",
+            "meaning": "People-cost mulai terlalu besar dibanding revenue.",
+            "action": "Freeze non-critical hiring, audit overtime/benefit/bonus, dan review manpower ROI."
+        })
+
+    if mq.get("state") in ["WATCH", "PRESSURE", "CRITICAL"]:
+        insights.append({
+            "title": "Margin quality needs attention",
+            "status": "WATCH",
+            "why": f"Gross Margin berada pada status {mq.get('state')}.",
+            "meaning": "Revenue belum tentu berkualitas jika margin project menurun.",
+            "action": "Review pricing, COGS, scope creep, rework, subcontractor, dan delivery cost."
+        })
+
+    if cr.get("state") in ["HIGH", "CRITICAL"]:
+        insights.append({
+            "title": "Capacity bottleneck may limit growth",
+            "status": "CRITICAL",
+            "why": f"Capacity Risk berada pada status {cr.get('state')} dengan score {cr.get('score')}/100.",
+            "meaning": "Pertumbuhan berikutnya berisiko tertahan oleh delivery capacity.",
+            "action": "Prioritaskan capacity review dan selective hiring pada fungsi bottleneck."
+        })
+
+    if not insights:
+        insights.append({
+            "title": "No major conflict detected",
+            "status": "BALANCED",
+            "why": "Indikator utama relatif seimbang.",
+            "meaning": "Tidak ada sinyal ekstrim dari revenue, people cost, margin, atau capacity.",
+            "action": "Pertahankan monitoring bulanan dan gunakan scenario simulator sebelum keputusan hiring."
+        })
+
+    return insights
+
+
+def hiring_decision_engine(dept_df: pd.DataFrame, cap_df: pd.DataFrame, year: int, targets: Dict[str, float]) -> pd.DataFrame:
+    """Department-level hiring recommendation using productivity + capacity proxy."""
+    if dept_df is None or dept_df.empty:
+        return pd.DataFrame(columns=["Dept_ID", "Dept_Name", "FJA_Category", "Headcount", "Manpower_Cost", "Dept_Revenue", "Revenue_per_Cost", "Capacity_Signal", "Recommendation", "Reason"])
+
+    d = dept_df.copy()
+    d = d[d["Year"] == int(year)].copy() if "Year" in d.columns else d.copy()
+    if d.empty:
+        return pd.DataFrame(columns=["Dept_ID", "Dept_Name", "FJA_Category", "Headcount", "Manpower_Cost", "Dept_Revenue", "Revenue_per_Cost", "Capacity_Signal", "Recommendation", "Reason"])
+
+    for col in ["Headcount", "Manpower_Cost", "Dept_Revenue", "Revenue_per_Cost", "Dept_RPE"]:
+        if col in d.columns:
+            d[col] = pd.to_numeric(d[col], errors="coerce")
+
+    if "Dept_Name" not in d.columns:
+        d["Dept_Name"] = d.get("Dept_ID", "Department")
+    if "FJA_Category" not in d.columns:
+        d["FJA_Category"] = "Unmapped"
+    if "Dept_Revenue" not in d.columns:
+        d["Dept_Revenue"] = np.nan
+    if "Revenue_per_Cost" not in d.columns:
+        d["Revenue_per_Cost"] = np.where(d["Manpower_Cost"] > 0, d["Dept_Revenue"] / d["Manpower_Cost"], np.nan)
+
+    cap_signal = pd.DataFrame()
+    if cap_df is not None and not cap_df.empty and "Dept_ID" in cap_df.columns:
+        cap = cap_df[cap_df["Year"] == int(year)].copy() if "Year" in cap_df.columns else cap_df.copy()
+        for col in ["Avg_Utilization_Pct", "Overtime_Hours", "Backlog_Count", "SLA_Breach_Count", "Turnover_Count"]:
+            if col in cap.columns:
+                cap[col] = pd.to_numeric(cap[col], errors="coerce").fillna(0)
+            else:
+                cap[col] = 0
+        cap_signal = cap.groupby("Dept_ID", as_index=False).agg(
+            Avg_Utilization=("Avg_Utilization_Pct", "max"),
+            Overtime=("Overtime_Hours", "sum"),
+            Backlog=("Backlog_Count", "sum"),
+            SLA_Breach=("SLA_Breach_Count", "sum"),
+            Turnover=("Turnover_Count", "sum"),
+        )
+
+    if not cap_signal.empty:
+        d = d.merge(cap_signal, on="Dept_ID", how="left")
+    else:
+        for col in ["Avg_Utilization", "Overtime", "Backlog", "SLA_Breach", "Turnover"]:
+            d[col] = 0
+
+    d[["Avg_Utilization", "Overtime", "Backlog", "SLA_Breach", "Turnover"]] = d[["Avg_Utilization", "Overtime", "Backlog", "SLA_Breach", "Turnover"]].fillna(0)
+
+    recommendations = []
+    reasons = []
+    capacity_signals = []
+
+    for _, r in d.iterrows():
+        fja = str(r.get("FJA_Category", ""))
+        rev_cost = r.get("Revenue_per_Cost")
+        dept_rev = r.get("Dept_Revenue")
+        util = r.get("Avg_Utilization", 0)
+        overtime = r.get("Overtime", 0)
+        backlog = r.get("Backlog", 0)
+        sla = r.get("SLA_Breach", 0)
+
+        high_capacity = (util >= 0.85) or (overtime > 250) or (backlog >= 10) or (sla > 0)
+        has_revenue = pd.notna(dept_rev) and dept_rev > 0
+        efficient = pd.notna(rev_cost) and rev_cost >= 4
+        low_eff = pd.notna(rev_cost) and rev_cost < 1.5
+
+        if high_capacity and (("Revenue Enabler" in fja) or ("Revenue Generator" in fja) or efficient or has_revenue):
+            rec = "HIRE"
+            reason = "Ada sinyal bottleneck/capacity pressure pada fungsi yang menopang revenue atau delivery."
+            cap_text = "HIGH"
+        elif high_capacity:
+            rec = "SELECTIVE"
+            reason = "Ada tekanan kapasitas, tetapi perlu validasi kontribusi revenue dan workload sebelum hiring."
+            cap_text = "MEDIUM"
+        elif low_eff and "Support" in fja:
+            rec = "FREEZE"
+            reason = "Fungsi support dengan cost intensity tinggi; optimasi proses lebih dulu sebelum tambah HC."
+            cap_text = "LOW"
+        elif low_eff:
+            rec = "HOLD"
+            reason = "Produktivitas/Revenue per Cost belum kuat; validasi output sebelum hiring."
+            cap_text = "LOW"
+        elif efficient and ("Revenue Generator" in fja or "Revenue Enabler" in fja):
+            rec = "SELECTIVE"
+            reason = "Produktivitas baik; hiring hanya bila ada pipeline/backlog yang jelas."
+            cap_text = "LOW"
+        else:
+            rec = "HOLD"
+            reason = "Belum ada sinyal kuat untuk tambah HC."
+            cap_text = "LOW"
+
+        recommendations.append(rec)
+        reasons.append(reason)
+        capacity_signals.append(cap_text)
+
+    out = d.copy()
+    out["Capacity_Signal"] = capacity_signals
+    out["Recommendation"] = recommendations
+    out["Reason"] = reasons
+
+    cols = ["Dept_ID", "Dept_Name", "FJA_Category", "Headcount", "Manpower_Cost", "Dept_Revenue", "Revenue_per_Cost", "Avg_Utilization", "Overtime", "Backlog", "SLA_Breach", "Capacity_Signal", "Recommendation", "Reason"]
+    cols = [c for c in cols if c in out.columns]
+    return out[cols].sort_values(["Recommendation", "Capacity_Signal", "Manpower_Cost"], ascending=[True, False, False])
+
+
+def compute_hc_guardrails(latest: pd.Series, targets: Dict[str, float]) -> Dict[str, float]:
+    """Compute max HC and required revenue under target MCR."""
+    revenue = _safe_float(latest.get("Total_Revenue"))
+    manpower_cost = _safe_float(latest.get("Total_Manpower_Cost"))
+    current_hc = _safe_float(latest.get("Total_Headcount"))
+    cost_per_hc = _safe_float(latest.get("Cost_per_HC"))
+    target_mcr = get_target(targets, "MCR_Healthy_Max", 0.07)
+
+    max_manpower_cost = revenue * target_mcr if pd.notna(revenue) else np.nan
+    remaining_budget = max_manpower_cost - manpower_cost if pd.notna(max_manpower_cost) and pd.notna(manpower_cost) else np.nan
+    additional_hc_capacity = np.floor(remaining_budget / cost_per_hc) if pd.notna(remaining_budget) and pd.notna(cost_per_hc) and cost_per_hc > 0 else np.nan
+    max_hc = current_hc + additional_hc_capacity if pd.notna(current_hc) and pd.notna(additional_hc_capacity) else np.nan
+    required_revenue = manpower_cost / target_mcr if pd.notna(manpower_cost) and target_mcr > 0 else np.nan
+    revenue_gap = required_revenue - revenue if pd.notna(required_revenue) and pd.notna(revenue) else np.nan
+
+    return {
+        "target_mcr": target_mcr,
+        "max_manpower_cost": max_manpower_cost,
+        "remaining_budget": remaining_budget,
+        "additional_hc_capacity": additional_hc_capacity,
+        "max_hc": max_hc,
+        "required_revenue": required_revenue,
+        "revenue_gap": revenue_gap,
+    }
+
+
+def build_roadmap(latest: pd.Series, bp: Dict[str, str], mq: Dict[str, str], mh: Dict[str, str], cr: Dict[str, object]) -> pd.DataFrame:
+    """12-month board roadmap based on current conditions."""
+    rows = []
+
+    def add(phase, priority, action, owner, success_metric):
+        rows.append({
+            "Phase": phase,
+            "Priority": priority,
+            "Action": action,
+            "Owner": owner,
+            "Success Metric": success_metric,
+        })
+
+    # Q1 / 0-3 months
+    if cr.get("state") in ["HIGH", "CRITICAL"]:
+        add("0-3 Months", "Critical", "Capacity review untuk fungsi bottleneck; validasi overtime, backlog, SLA, dan dependency.", "COO / HR", "Capacity score turun minimal 15 poin")
+    if mh.get("state") in ["COST_PRESSURE", "CRITICAL"]:
+        add("0-3 Months", "Critical", "Freeze non-critical hiring dan review komponen manpower cost.", "CFO / HR", "MCR turun menuju <=9%")
+    if mq.get("state") in ["WATCH", "PRESSURE", "CRITICAL"]:
+        add("0-3 Months", "High", "Margin quality review per project/customer.", "CFO / Sales / Ops", "Gross Margin kembali >=25%")
+
+    # 3-6 months
+    add("3-6 Months", "High", "Implementasi selective hiring hanya pada fungsi revenue/delivery bottleneck.", "CEO / HR / COO", "Hiring approved berbasis ROI dan capacity evidence")
+    add("3-6 Months", "Medium", "Productivity program: SOP, automation, redistribusi workload, dan KPI per role.", "HR / Dept Head", "RPE naik dan overtime turun")
+
+    # 6-12 months
+    add("6-12 Months", "Medium", "Review organisasi: ratio revenue generator, enabler, support, dan governance.", "CEO / HR", "Support cost share terkendali")
+    add("6-12 Months", "Medium", "Build talent pipeline dan succession planning untuk role kritikal.", "HR / COO", "Dependency critical turun ke Medium/Low")
+
+    return pd.DataFrame(rows)
+
+
+
+def make_kpi_movement_df(latest: pd.Series) -> pd.DataFrame:
+    rows = [
+        {"Metric": "Revenue Growth", "Value": latest.get("Revenue_YoY"), "Type": "Growth"},
+        {"Metric": "Headcount Growth", "Value": latest.get("Headcount_YoY"), "Type": "Growth"},
+        {"Metric": "RPE Growth", "Value": latest.get("RPE_YoY"), "Type": "Growth"},
+        {"Metric": "MCR Delta", "Value": latest.get("MCR_Delta"), "Type": "Delta"},
+        {"Metric": "Gross Margin Delta", "Value": latest.get("GrossMargin_Delta"), "Type": "Delta"},
+    ]
+    df = pd.DataFrame(rows)
+    df["Value_Pct"] = pd.to_numeric(df["Value"], errors="coerce") * 100
+    return df
+
+
+def make_decision_priority_df(bp: Dict[str, str], mq: Dict[str, str], mh: Dict[str, str], cr: Dict[str, object]) -> pd.DataFrame:
+    def sev(status: str) -> int:
+        s = str(status).upper()
+        if s in ["CRITICAL", "DEFENSIVE", "COST_PRESSURE", "HIGH"]:
+            return 90
+        if s in ["WATCH", "PRESSURE", "CAPACITY_RISK", "MEDIUM", "ULTRA_EFFICIENCY"]:
+            return 65
+        if s in ["BALANCED", "HEALTHY"]:
+            return 35
+        if s in ["HIGH_LEVERAGE", "STRONG", "LOW"]:
+            return 20
+        return 50
+
+    return pd.DataFrame([
+        {"Area": "Business Posture", "Status": bp.get("state"), "Priority": sev(bp.get("state"))},
+        {"Area": "Margin Quality", "Status": mq.get("state"), "Priority": sev(mq.get("state"))},
+        {"Area": "MCR Health", "Status": mh.get("state"), "Priority": sev(mh.get("state"))},
+        {"Area": "Capacity Risk", "Status": cr.get("state"), "Priority": sev(cr.get("state"))},
+    ])
+
+
+def scenario_curve_df(latest: pd.Series, revenue_growth: float, avg_cost: float, max_hc: int = 30) -> pd.DataFrame:
+    rows = []
+    base_rev = _safe_float(latest.get("Total_Revenue"))
+    base_cost = _safe_float(latest.get("Total_Manpower_Cost"))
+    base_hc = _safe_float(latest.get("Total_Headcount"))
+    for add in range(0, max_hc + 1, 2):
+        rev = base_rev * (1 + revenue_growth) if pd.notna(base_rev) else np.nan
+        cost = base_cost + (add * avg_cost) if pd.notna(base_cost) else np.nan
+        hc = base_hc + add if pd.notna(base_hc) else np.nan
+        rows.append({
+            "Additional_HC": add,
+            "Projected_Revenue": rev,
+            "Projected_Manpower_Cost": cost,
+            "Projected_HC": hc,
+            "Projected_MCR": cost / rev if pd.notna(cost) and pd.notna(rev) and rev else np.nan,
+            "Projected_RPE": rev / hc if pd.notna(rev) and pd.notna(hc) and hc else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+
+def executive_closing_text(latest: pd.Series, bp: Dict[str, str], mq: Dict[str, str], mh: Dict[str, str], cr: Dict[str, object], targets: Dict[str, float], currency: str) -> str:
+    """Board-ready final paragraph."""
+    guard = compute_hc_guardrails(latest, targets)
+    return (
+        f"Berdasarkan analisis HR vs Revenue, perusahaan berada pada posture **{bp.get('state')}** dengan "
+        f"MCR **{_pct(latest.get('MCR_Pct'))}**, RPE **{_money(latest.get('RPE'), currency)}**, "
+        f"Gross Margin **{_pct(latest.get('Gross_Margin_Pct'))}**, dan Capacity Risk **{cr.get('state')}**. "
+        f"Fokus keputusan bukan hanya menaikkan revenue, tetapi memastikan setiap tambahan manpower menghasilkan produktivitas yang lebih baik. "
+        f"Dengan target MCR sehat di **{_pct(guard.get('target_mcr'))}**, revenue minimum yang dibutuhkan untuk menopang manpower cost saat ini adalah "
+        f"**{_money(guard.get('required_revenue'), currency)}**. "
+        f"Rekomendasi utama: lakukan hiring secara selektif pada fungsi bottleneck, tahan penambahan support non-critical, "
+        f"jaga margin project, dan gunakan MCR sebagai guardrail sebelum menyetujui tambahan HC."
+    )
+
+
+def badge_html(label: str, state: str, tone: str, sub: str = "") -> str:
+    color = TONE_COLOR.get(tone, "#64748b")
+    return f"""
+    <div style="
+        border:1px solid rgba(148,163,184,.35);
+        border-radius:16px;
+        padding:14px 16px;
+        background:rgba(15,23,42,.04);
+        min-height:94px;">
+        <div style="font-size:12px; color:#64748b; text-transform:uppercase; letter-spacing:.08em;">{label}</div>
+        <div style="display:flex; align-items:center; gap:8px; margin-top:8px;">
+            <span style="width:12px; height:12px; background:{color}; border-radius:99px; display:inline-block;"></span>
+            <span style="font-size:20px; font-weight:700;">{state}</span>
+        </div>
+        <div style="font-size:12px; color:#64748b; margin-top:6px;">{sub}</div>
+    </div>
+    """
+
+
+
+# =========================
+# SEP V4 EXECUTIVE INTELLIGENCE HELPERS
+# =========================
+def sep_score_from_state(state: str, positive: bool = True) -> int:
+    s = str(state).upper()
+    if positive:
+        return {
+            "STRONG": 100, "HEALTHY": 90, "HIGH_LEVERAGE": 95, "GROWTH_READY": 95,
+            "BALANCED": 75, "OPTIMIZE_GROWTH": 80, "WATCH": 62, "SELECTIVE_HIRING": 65,
+            "ULTRA_EFFICIENCY": 60, "PRESSURE": 42, "CAPACITY_RISK": 45,
+            "COST_PRESSURE": 35, "CRITICAL": 15, "DEFENSIVE": 20,
+            "LOW": 90, "MEDIUM": 65, "HIGH": 35
+        }.get(s, 55)
+    return {"LOW": 90, "MEDIUM": 65, "HIGH": 35, "CRITICAL": 15}.get(s, 55)
+
+
+def sep_company_health_index(latest: pd.Series, bp: Dict[str, str], mq: Dict[str, str], mh: Dict[str, str], cr: Dict[str, object], board_score: Dict[str, object]) -> Dict[str, object]:
+    revenue_score = board_score.get("components", {}).get("Revenue Growth", 50)
+    productivity_score = board_score.get("components", {}).get("RPE Growth", 50)
+    margin_score = board_score.get("components", {}).get("Margin Quality", sep_score_from_state(mq.get("state")))
+    people_score = board_score.get("components", {}).get("MCR Health", sep_score_from_state(mh.get("state")))
+    capacity_score = board_score.get("components", {}).get("Capacity Risk", sep_score_from_state(cr.get("state"), positive=False))
+    posture_score = sep_score_from_state(bp.get("state"))
+    health = int(round(revenue_score * 0.20 + productivity_score * 0.20 + margin_score * 0.18 + people_score * 0.18 + capacity_score * 0.14 + posture_score * 0.10))
+    if health >= 85:
+        label, tone = "Excellent", "success"
+    elif health >= 70:
+        label, tone = "Good", "info"
+    elif health >= 55:
+        label, tone = "Watch", "warning"
+    elif health >= 40:
+        label, tone = "Pressure", "warning"
+    else:
+        label, tone = "Critical", "error"
+    components = pd.DataFrame([
+        {"Area": "Revenue", "Score": revenue_score},
+        {"Area": "Productivity", "Score": productivity_score},
+        {"Area": "Margin", "Score": margin_score},
+        {"Area": "People Cost", "Score": people_score},
+        {"Area": "Capacity", "Score": capacity_score},
+        {"Area": "Business Posture", "Score": posture_score},
+    ])
+    return {"score": health, "label": label, "tone": tone, "components": components}
+
+
+def sep_workforce_portfolio(dept_df: pd.DataFrame, year: int) -> pd.DataFrame:
+    if dept_df is None or dept_df.empty:
+        return pd.DataFrame()
+    d = dept_df[dept_df["Year"] == int(year)].copy() if "Year" in dept_df.columns else dept_df.copy()
+    if d.empty:
+        return pd.DataFrame()
+    for col in ["Headcount", "Manpower_Cost", "Dept_Revenue", "Dept_RPE", "Revenue_per_Cost", "Cost_per_HC"]:
+        if col in d.columns:
+            d[col] = pd.to_numeric(d[col], errors="coerce")
+    if "Dept_Name" not in d.columns:
+        d["Dept_Name"] = d.get("Dept_ID", "Department")
+    if "FJA_Category" not in d.columns:
+        d["FJA_Category"] = "Unmapped"
+    if "Revenue_per_Cost" not in d.columns:
+        d["Revenue_per_Cost"] = np.nan
+    d["Manpower_Cost"] = d.get("Manpower_Cost", 0).fillna(0)
+    med_rpc = d["Revenue_per_Cost"].replace([np.inf, -np.inf], np.nan).median()
+    med_cost = d["Manpower_Cost"].replace([np.inf, -np.inf], np.nan).median()
+    med_rpc = 1.0 if pd.isna(med_rpc) else med_rpc
+    med_cost = 0.0 if pd.isna(med_cost) else med_cost
+    def quad(r):
+        rpc = r.get("Revenue_per_Cost")
+        cost = r.get("Manpower_Cost")
+        high_revenue = pd.notna(rpc) and rpc >= med_rpc
+        high_cost = pd.notna(cost) and cost >= med_cost
+        if high_revenue and not high_cost:
+            return "Scale / Protect"
+        if high_revenue and high_cost:
+            return "Strategic Engine"
+        if (not high_revenue) and high_cost:
+            return "Optimize / Review"
+        return "Maintain / Automate"
+    d["Portfolio_Quadrant"] = d.apply(quad, axis=1)
+    return d
+
+
+def sep_risk_matrix(bp: Dict[str, str], mq: Dict[str, str], mh: Dict[str, str], cr: Dict[str, object], latest: pd.Series) -> pd.DataFrame:
+    def impact_level(status):
+        return {"CRITICAL": 90, "HIGH": 80, "COST_PRESSURE": 75, "PRESSURE": 70, "WATCH": 55, "MEDIUM": 50, "ULTRA_EFFICIENCY": 55, "BALANCED": 35, "HEALTHY": 25, "STRONG": 20, "LOW": 20, "HIGH_LEVERAGE": 20}.get(str(status).upper(), 45)
+    return pd.DataFrame([
+        {"Risk": "Capacity bottleneck", "Probability": 70 if cr.get("state") in ["HIGH", "CRITICAL"] else 45 if cr.get("state") == "MEDIUM" else 25, "Impact": impact_level(cr.get("state")), "Owner": "COO / HR", "Mitigation": "Capacity review, workload balancing, selective hiring"},
+        {"Risk": "MCR pressure", "Probability": 75 if mh.get("state") in ["COST_PRESSURE", "CRITICAL"] else 45 if mh.get("state") in ["WATCH", "ULTRA_EFFICIENCY"] else 25, "Impact": impact_level(mh.get("state")), "Owner": "CFO / HR", "Mitigation": "Hiring guardrail, payroll review, productivity program"},
+        {"Risk": "Margin compression", "Probability": 75 if mq.get("state") in ["PRESSURE", "CRITICAL"] else 50 if mq.get("state") == "WATCH" else 25, "Impact": impact_level(mq.get("state")), "Owner": "CFO / Sales / Ops", "Mitigation": "Pricing review, COGS control, scope discipline"},
+        {"Risk": "Growth productivity", "Probability": 65 if bp.get("state") in ["CAPACITY_RISK", "COST_PRESSURE", "DEFENSIVE"] else 30, "Impact": impact_level(bp.get("state")), "Owner": "CEO / CHRO", "Mitigation": "RPE improvement, function mix review, revenue pipeline validation"},
+    ])
+
+
+def sep_decision_cards(latest: pd.Series, bp: Dict[str, str], mq: Dict[str, str], mh: Dict[str, str], cr: Dict[str, object], board_score: Dict[str, object]) -> pd.DataFrame:
+    cards = []
+    def add(decision, impact, confidence, trigger, action):
+        cards.append({"Decision": decision, "Impact": impact, "Confidence": confidence, "Trigger": trigger, "Action": action})
+    if cr.get("state") in ["HIGH", "CRITICAL"]:
+        add("Selective capacity hiring", "High", "High", f"Capacity {cr.get('state')} / score {cr.get('score')}", "Prioritaskan hiring pada delivery/revenue bottleneck")
+    if mh.get("state") in ["COST_PRESSURE", "CRITICAL"]:
+        add("Freeze non-critical hiring", "High", "High", f"MCR {mh.get('state')}", "Tahan support hiring dan review manpower cost")
+    elif mh.get("state") == "ULTRA_EFFICIENCY" and cr.get("state") in ["HIGH", "CRITICAL"]:
+        add("Validate under-capacity", "High", "Medium", "MCR terlalu rendah tapi capacity risk tinggi", "Audit workload, overtime, backlog, SLA, dan dependency")
+    if mq.get("state") in ["WATCH", "PRESSURE", "CRITICAL"]:
+        add("Margin recovery program", "Medium", "High", f"Margin {mq.get('state')}", "Review pricing, COGS, rework, delivery cost")
+    if bp.get("state") == "HIGH_LEVERAGE" and cr.get("state") in ["LOW", "MEDIUM"]:
+        add("Controlled scale-up", "High", "Medium", "Revenue/RPE kuat", "Scale revenue generator/enabler dengan MCR guardrail")
+    if not cards:
+        add("Maintain and optimize", "Medium", "Medium", "Indikator relatif seimbang", "Pertahankan monitoring bulanan dan scenario planning")
+    return pd.DataFrame(cards)
+
+
+def sep_presentation_flow(latest: pd.Series, health: Dict[str, object], board_score: Dict[str, object]) -> pd.DataFrame:
+    return pd.DataFrame([
+        {"Slide": 1, "Title": "Executive Cockpit", "Key Message": f"Company Health {health['score']}/100 - {health['label']}", "Visual": "Health gauge + KPI cards"},
+        {"Slide": 2, "Title": "Revenue vs Manpower", "Key Message": "Baca apakah revenue tumbuh lebih cepat daripada manpower cost", "Visual": "Revenue vs manpower trend"},
+        {"Slide": 3, "Title": "MCR & RPE", "Key Message": "Pastikan tambahan HC menghasilkan produktivitas", "Visual": "MCR/RPE trend and guardrail"},
+        {"Slide": 4, "Title": "Workforce Portfolio", "Key Message": "Tentukan fungsi yang harus scale, optimize, hold, atau automate", "Visual": "Portfolio matrix"},
+        {"Slide": 5, "Title": "Capacity & Hiring", "Key Message": "Hiring hanya untuk bottleneck yang terbukti", "Visual": "Hiring priority matrix"},
+        {"Slide": 6, "Title": "Risk & Decision", "Key Message": f"Board Decision: {board_score.get('label')}", "Visual": "Risk matrix + decision cards"},
+        {"Slide": 7, "Title": "Executive Closing", "Key Message": "Action plan 90 hari dan 12 bulan", "Visual": "Roadmap + closing statement"},
+    ])
+
+
+def sep_score_bar(label: str, score: int, tone: str = "info") -> str:
+    color = TONE_COLOR.get(tone, "#3b82f6")
+    return f'''
+    <div style="margin:8px 0 12px 0;">
+      <div style="display:flex; justify-content:space-between; font-size:13px; color:#475569;"><b>{label}</b><span>{score}/100</span></div>
+      <div style="height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; margin-top:5px;">
+        <div style="height:10px; width:{max(0,min(100,int(score)))}%; background:{color}; border-radius:999px;"></div>
+      </div>
+    </div>
+    '''
+
+
+# =========================
+# SIDEBAR
+# =========================
+with st.sidebar:
+    st.header("⚙️ Data Source")
+    uploaded = st.file_uploader("Upload Excel v2", type=["xlsx"])
+    st.caption("Jika tidak upload, app akan membaca file default dari folder data/ di repo.")
+
+file_bytes = uploaded.getvalue() if uploaded is not None else None
+sheets, warnings = load_workbook(file_bytes, DEFAULT_FILE)
+
+# =========================
+# HEADER
+# =========================
+render_top_header()
+
+if warnings:
+    for w in warnings:
+        st.warning(w)
+
+if any(s not in sheets for s in REQUIRED_SHEETS):
+    st.error("Data belum lengkap. Pastikan Excel memiliki sheet wajib: " + ", ".join(REQUIRED_SHEETS))
+    st.stop()
+
+# Calendar determines whether a year is full-year or YTD.
+_pre_years = []
+for _s in ["REVENUE_YR", "HEADCOUNT_YR", "PAYROLL_YR"]:
+    if _s in sheets and "Year" in sheets[_s].columns:
+        _pre_years.extend(pd.to_numeric(sheets[_s]["Year"], errors="coerce").dropna().astype(int).tolist())
+_calendar_preview = build_calendar(sheets.get("CALENDAR", pd.DataFrame()), sorted(set(_pre_years)))
+
+with st.sidebar:
+    st.header("📅 Analysis Mode")
+    analysis_mode = st.radio(
+        "Analysis Mode",
+        ["Actual", "YTD Comparable", "Annual Projection", "MCR Focus"],
+        index=1 if ((_calendar_preview["Months_Closed"] < 12).any() if not _calendar_preview.empty else False) else 0,
+        help="Actual = angka input. YTD Comparable = semua tahun ke basis bulan YTD. Annual Projection = full-year projection. MCR Focus = revenue projected, cost actual/YTD."
+    )
+
+data = clean_and_calc(sheets, analysis_mode=analysis_mode)
+params = build_params(data["params"])
+targets = load_targets(data["targets"])
+currency = params.get("Currency_Code", "IDR")
+
+yr = data["yearly"].dropna(subset=["Year"]).copy()
+if yr.empty:
+    st.error("Data yearly kosong.")
+    st.stop()
+
+available_years = sorted(yr["Year"].dropna().astype(int).unique().tolist())
+with st.sidebar:
+    st.header("🧭 Filters")
+    year_sel = st.selectbox("Analysis Year", available_years, index=len(available_years)-1)
+    year_min, year_max = st.slider("Trend Range", min_value=min(available_years), max_value=max(available_years), value=(min(available_years), max(available_years)), step=1)
+    fja_filter = st.multiselect("FJA Category", sorted(data["fja"]["FJA_Category"].dropna().unique().tolist()), default=sorted(data["fja"]["FJA_Category"].dropna().unique().tolist()))
+
+yr_range = yr[(yr["Year"] >= year_min) & (yr["Year"] <= year_max)].copy()
+latest = yr[yr["Year"] == year_sel].iloc[0]
+prev_df = yr[yr["Year"] < year_sel].sort_values("Year")
+prev = prev_df.iloc[-1] if not prev_df.empty else None
+period_info = get_calendar_info(data.get("calendar", pd.DataFrame()), year_sel)
+
+bp = business_posture(latest.get("Revenue_YoY"), latest.get("Headcount_YoY"), latest.get("RPE_YoY"), latest.get("MCR_Pct"), targets)
+mq = margin_quality(latest.get("Gross_Margin_Pct"), targets)
+mh = mcr_health(latest.get("MCR_Pct"), targets)
+cr = capacity_risk(latest, data["capacity"], targets)
+
+# =========================
+# EXECUTIVE COCKPIT
+# =========================
+st.markdown("## 1. Executive Summary")
+st.caption(
+    f"Periode data: {period_info.get('Period_Label')} | Months closed: {period_info.get('Months_Closed')}/12 | "
+    f"Mode: {analysis_mode} | Data confidence: {period_info.get('Data_Confidence')}"
+)
+st.info(data.get("mode_note", ""))
+if analysis_mode == "Actual" and period_info.get("Months_Closed", 12) < 12:
+    st.warning("Periode terpilih masih YTD. Komparasi Actual vs tahun full-year tidak apple-to-apple. Gunakan YTD Comparable untuk apple-to-apple atau Annual Projection untuk proyeksi full-year.")
+
+b1, b2, b3, b4 = st.columns(4)
+with b1:
+    st.markdown(badge_html("Business Posture", bp["state"], bp["tone"], bp["hint"]), unsafe_allow_html=True)
+with b2:
+    st.markdown(badge_html("Margin Quality", mq["state"], mq["tone"], mq["hint"]), unsafe_allow_html=True)
+with b3:
+    st.markdown(badge_html("MCR Health", mh["state"], mh["tone"], mh["hint"]), unsafe_allow_html=True)
+with b4:
+    st.markdown(badge_html("Capacity Risk", cr["state"], cr["tone"], f"Score {cr['score']}/100 — {cr.get('recommendation', '-')}"), unsafe_allow_html=True)
+
+st.markdown("")
+
+k1, k2, k3 = st.columns(3)
+k4, k5, k6 = st.columns(3)
+with k1:
+    st.metric("💰 Revenue", _money(latest.get("Total_Revenue"), currency), _pct(latest.get("Revenue_YoY")))
+with k2:
+    st.metric("👥 Headcount", _num(latest.get("Total_Headcount")), _pct(latest.get("Headcount_YoY")))
+with k3:
+    st.metric("⚡ RPE", _money(latest.get("RPE"), currency), _pct(latest.get("RPE_YoY")))
+with k4:
+    st.metric("📊 MCR", _pct(latest.get("MCR_Pct")), _pp(latest.get("MCR_Delta")))
+with k5:
+    st.metric("📈 Gross Margin", _pct(latest.get("Gross_Margin_Pct")), _pp(latest.get("GrossMargin_Delta")))
+with k6:
+    st.metric("💼 Manpower Cost", _money(latest.get("Total_Manpower_Cost"), currency), _pct(latest.get("ManpowerCost_YoY")))
+
+st.markdown("#### Board Memo")
+memo = (
+    f"Pada {period_info.get('Period_Label')} dalam mode **{analysis_mode}**, revenue terbaca **{_money(latest.get('Total_Revenue'), currency)}** "
+    f"dengan headcount **{_num(latest.get('Total_Headcount'))}** dan RPE **{_money(latest.get('RPE'), currency)}**. "
+    f"Business Posture terbaca **{bp['state']}**, sementara Margin Quality berada di **{mq['state']}** dan MCR Health **{mh['state']}**. "
+    f"Fokus management: {management_action(bp['state'], mq['state'], mh['state'], cr['state'])[0]}."
+)
+st.info(memo)
+
+with st.expander("How to Read Executive Summary"):
+    st.markdown("""
+    ### Mode Analisis
+
+    - **Actual** = angka sesuai input Excel.
+    - **YTD Comparable** = semua tahun dikonversi ke basis bulan YTD yang sama. Cocok untuk membandingkan 2025 vs 2026 YTD secara apple-to-apple.
+    - **Annual Projection** = YTD disetahunkan dengan faktor **12 / Months_Closed**. Jika 4 bulan maka x3; jika 6 bulan maka x2.
+    - **MCR Focus** = revenue diproyeksikan full-year, tetapi manpower cost dan COGS tetap actual/YTD. Mode ini membuat MCR dan Gross Margin berubah sebagai stress-test.
+
+    ### KPI Utama
+
+    - **Revenue** = pendapatan yang diakui pada periode terpilih.
+    - **Headcount** = rata-rata jumlah SDM/FTE yang digunakan untuk menghasilkan revenue.
+    - **RPE (Revenue per Employee)** = produktivitas per orang. Semakin tinggi berarti setiap orang menghasilkan revenue lebih besar.
+    - **MCR (Manpower Cost Ratio)** = Total Manpower Cost / Revenue. Ini menunjukkan porsi biaya SDM terhadap revenue.
+    - **Gross Margin** = kualitas profit setelah direct cost/COGS.
+    - **Business Posture** membaca kombinasi Revenue Growth, Headcount Growth, RPE, dan MCR.
+    - **Capacity Risk** adalah early warning kapasitas; bukan bukti burnout, tetapi sinyal perlu validasi workload.
+
+    ### Target & Threshold yang Dibaca Dashboard
+
+    | KPI / Threshold | Target | Cara Baca |
+    |---|---:|---|
+    | Revenue Growth Min | **>=20%** | Pertumbuhan revenue dianggap kuat |
+    | RPE Growth Min | **>=15%** | Produktivitas per karyawan meningkat kuat |
+    | Headcount Growth Max High Leverage | **<=10%** | HC masih terkendali untuk kondisi high leverage |
+    | MCR Ultra Efficiency Max | **<5%** | Sangat efisien, tetapi perlu validasi kapasitas |
+    | MCR Healthy | **5-7%** | Zona sehat manpower cost |
+    | MCR Watch | **7-9%** | Zona pantau people-cost |
+    | MCR Cost Pressure | **9-14%** | Biaya manpower mulai menekan revenue |
+    | MCR Critical | **>14%** | People-cost berada pada level kritikal |
+    | Gross Margin Strong | **>35%** | Margin sangat kuat |
+    | Gross Margin Healthy | **25-35%** | Margin sehat |
+    | Gross Margin Watch | **15-25%** | Margin perlu dipantau |
+    | Gross Margin Pressure | **10-15%** | Margin mulai tertekan |
+    | Gross Margin Critical | **<10%** | Margin kritikal |
+
+    ### Cara Membaca Cepat
+
+    - Kondisi ideal: **Revenue Growth >=20%**, **RPE Growth >=15%**, **Headcount Growth <=10%**, **MCR 5-7%**, dan **Gross Margin minimal 25%**.
+    - Jika **MCR rendah tetapi Capacity Risk tinggi**, efisiensi perlu divalidasi karena bisa menandakan overload atau under-capacity.
+    - Jika **Revenue naik tetapi Gross Margin turun**, fokus analisis harus pindah ke pricing, COGS, scope creep, dan delivery cost.
+    """)
+
+# =========================
+# WORKFORCE PRODUCTIVITY
+# =========================
+st.markdown("## 2. Workforce Productivity")
+
+c1, c2 = st.columns(2)
+with c1:
+    fig = px.line(yr_range, x="Year", y=["Total_Revenue", "Total_Manpower_Cost"], markers=True, title="Revenue vs Manpower Cost")
+    fig.update_layout(margin=dict(l=10, r=10, t=45, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+with c2:
+    fig = px.line(yr_range, x="Year", y=["RPE", "Cost_per_HC"], markers=True, title="Revenue per Employee vs Cost per HC")
+    fig.update_layout(margin=dict(l=10, r=10, t=45, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+c3, c4 = st.columns(2)
+with c3:
+    fig = px.line(yr_range, x="Year", y="Revenue_per_Payroll", markers=True, title="Revenue Generated per 1 Payroll Rupiah")
+    fig.update_layout(margin=dict(l=10, r=10, t=45, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+with c4:
+    growth = yr_range[["Year", "Revenue_YoY", "Headcount_YoY", "RPE_YoY", "ManpowerCost_YoY"]].melt(id_vars="Year", var_name="Metric", value_name="YoY")
+    fig = px.line(growth, x="Year", y="YoY", color="Metric", markers=True, title="YoY Growth Comparison")
+    fig.update_yaxes(tickformat=".0%")
+    fig.update_layout(margin=dict(l=10, r=10, t=45, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+with st.expander("How to Read Workforce Productivity"):
+    st.markdown("""
+    - **Revenue vs Manpower Cost**: revenue idealnya tumbuh lebih cepat daripada manpower cost.
+    - **RPE** menunjukkan produktivitas SDM; naik berarti output revenue per orang membaik.
+    - **Cost per HC** menunjukkan rata-rata biaya manpower per orang.
+    - **Revenue per Payroll Rupiah** menunjukkan berapa rupiah revenue yang dihasilkan oleh setiap 1 rupiah payroll/manpower cost.
+    - **YoY Growth Comparison** membaca keseimbangan pertumbuhan revenue, headcount, RPE, dan manpower cost.
+    - Kondisi ideal: **Revenue Growth dan RPE Growth naik**, sementara **Headcount Growth dan Manpower Cost Growth tetap terkendali**.
+    """)
+
+# =========================
+# FJA ANALYTICS
+# =========================
+st.markdown("## 3. Functional Job Analysis (FJA)")
+
+fja = data["fja"].copy()
+fja = fja[(fja["Year"] >= year_min) & (fja["Year"] <= year_max)]
+if fja_filter:
+    fja = fja[fja["FJA_Category"].isin(fja_filter)]
+
+fja_latest = fja[fja["Year"] == year_sel].copy()
+fc1, fc2 = st.columns([1.2, 1.0])
+with fc1:
+    if not fja_latest.empty:
+        fig = px.treemap(fja_latest, path=["FJA_Category"], values="Manpower_Cost", title=f"Functional Cost Mix — {year_sel}")
+        fig.update_layout(margin=dict(l=10, r=10, t=45, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+with fc2:
+    if not fja_latest.empty:
+        fja_show = fja_latest[["FJA_Category", "Manpower_Cost", "Cost_Share", "Headcount", "HC_Share"]].copy()
+        fja_show["Manpower_Cost"] = fja_show["Manpower_Cost"].map(lambda x: _money(x, currency))
+        fja_show["Cost_Share"] = fja_show["Cost_Share"].map(_pct)
+        fja_show["HC_Share"] = fja_show["HC_Share"].map(_pct)
+        st.dataframe(fja_show.sort_values("Cost_Share", ascending=False), use_container_width=True, hide_index=True)
+
+fig = px.area(fja, x="Year", y="Manpower_Cost", color="FJA_Category", title="FJA Manpower Cost Trend")
+fig.update_layout(margin=dict(l=10, r=10, t=45, b=10))
+st.plotly_chart(fig, use_container_width=True)
+
+
+with st.expander("How to Read Functional Job Analysis"):
+    st.markdown("""
+    - **Revenue Generator** = fungsi yang langsung menciptakan revenue, misalnya Sales atau Account Manager.
+    - **Revenue Enabler** = fungsi yang memungkinkan revenue direalisasikan, misalnya Engineering, Operations, Project Delivery, NOC.
+    - **Support Function** = fungsi pendukung seperti HR, Finance, Procurement, GA.
+    - **Governance / Management** = fungsi pengarah, kontrol, dan pengambil keputusan.
+    - **Functional Cost Mix** membaca porsi manpower cost per kategori FJA.
+    - Struktur yang sehat untuk bisnis project/IT/telco biasanya memiliki porsi besar di **Revenue Enabler**, namun **Support Function** tetap harus terkendali.
+    - Red flag: Support Function tumbuh lebih cepat daripada Revenue Generator/Enabler tanpa alasan governance yang kuat.
+    """)
+
+# =========================
+# DEPARTMENT PRODUCTIVITY
+# =========================
+st.markdown("## 4. Department Productivity")
+
+dept = data["dept"].copy()
+dept = dept[dept["Year"] == year_sel].copy()
+if fja_filter:
+    dept = dept[dept["FJA_Category"].isin(fja_filter)]
+
+if not dept.empty:
+    # Board-grade Department Productivity Map.
+    # X = Headcount, Y = Manpower Cost, Bubble = Dept Revenue, Color = FJA Category.
+    # If Dept Revenue is empty/zero, bubble uses Headcount as fallback so chart never crashes.
+    dept_plot = dept.copy()
+    dept_plot["Dept_Name"] = dept_plot["Dept_Name"].fillna(dept_plot["Dept_ID"]).astype(str)
+    dept_plot["FJA_Category"] = dept_plot["FJA_Category"].fillna("Unmapped").astype(str)
+    dept_plot["Dept_Revenue"] = pd.to_numeric(dept_plot.get("Dept_Revenue"), errors="coerce").fillna(0.0)
+    dept_plot["Headcount"] = pd.to_numeric(dept_plot.get("Headcount"), errors="coerce").fillna(0.0)
+    dept_plot["Manpower_Cost"] = pd.to_numeric(dept_plot.get("Manpower_Cost"), errors="coerce").fillna(0.0)
+    dept_plot["Bubble_Size"] = dept_plot["Dept_Revenue"].clip(lower=0)
+
+    if dept_plot["Bubble_Size"].max() <= 0:
+        dept_plot["Bubble_Size"] = dept_plot["Headcount"].clip(lower=1)
+        bubble_note = "Bubble size memakai Headcount karena Revenue by Dept belum tersedia/masih nol."
+    else:
+        min_positive = dept_plot.loc[dept_plot["Bubble_Size"] > 0, "Bubble_Size"].min()
+        dept_plot["Bubble_Size"] = dept_plot["Bubble_Size"].replace(0, min_positive * 0.12)
+        bubble_note = "Bubble size memakai Dept Revenue; nilai revenue nol diberi minimum visual agar tetap terbaca."
+
+    fja_color_map = {
+        "Revenue Generator": "#22C55E",
+        "Revenue Enabler": "#3B82F6",
+        "Support Function": "#F59E0B",
+        "Governance / Management": "#8B5CF6",
+        "Governance": "#8B5CF6",
+        "Unmapped": "#64748B",
+    }
+
+    fig = px.scatter(
+        dept_plot,
+        x="Headcount",
+        y="Manpower_Cost",
+        size="Bubble_Size",
+        color="FJA_Category",
+        text="Dept_Name",
+        color_discrete_map=fja_color_map,
+        hover_name="Dept_Name",
+        hover_data={
+            "Dept_ID": True,
+            "Function_Group": True,
+            "FJA_Category": True,
+            "Headcount": ":.1f",
+            "Manpower_Cost": ":,.0f",
+            "Dept_Revenue": ":,.0f",
+            "Dept_RPE": ":,.0f",
+            "Revenue_per_Cost": ":.2f",
+            "Bubble_Size": False,
+            "Dept_Name": False,
+        },
+        title="Department Productivity Map",
+        labels={
+            "Headcount": "Headcount",
+            "Manpower_Cost": "Manpower Cost",
+            "FJA_Category": "FJA Category",
+        },
+        size_max=56,
+    )
+
+    fig.update_traces(
+        textposition="middle center",
+        textfont=dict(size=11, color="white"),
+        marker=dict(
+            opacity=0.86,
+            line=dict(width=2, color="rgba(255,255,255,0.85)")
+        ),
+        selector=dict(mode="markers+text"),
+    )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=58, b=10),
+        legend_title_text="FJA Category",
+        height=520,
+        title=dict(
+            text="Department Productivity Map<br><sup>Bubble Size = Revenue | X = Headcount | Y = Manpower Cost | Color = FJA Category</sup>",
+            x=0.0,
+            xanchor="left",
+        ),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(148,163,184,0.25)", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(148,163,184,0.25)", zeroline=False)
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(bubble_note + " Idealnya bubble besar berada tidak terlalu tinggi di Manpower Cost, menandakan revenue besar dengan biaya terkendali.")
+
+    # Quick board reading cards
+    highest_cost = dept_plot.sort_values("Manpower_Cost", ascending=False).head(1)
+    highest_rpe = dept_plot.replace([np.inf, -np.inf], np.nan).dropna(subset=["Dept_RPE"]).sort_values("Dept_RPE", ascending=False).head(1)
+    low_rev_high_cost = dept_plot.copy()
+    low_rev_high_cost["Cost_Intensity"] = np.where(low_rev_high_cost["Dept_Revenue"] > 0, low_rev_high_cost["Manpower_Cost"] / low_rev_high_cost["Dept_Revenue"], np.nan)
+    cost_watch = low_rev_high_cost.dropna(subset=["Cost_Intensity"]).sort_values("Cost_Intensity", ascending=False).head(1)
+
+    rc1, rc2, rc3 = st.columns(3)
+    with rc1:
+        if not highest_cost.empty:
+            r = highest_cost.iloc[0]
+            st.metric("Highest Manpower Cost", r["Dept_Name"], _money(r["Manpower_Cost"], currency))
+    with rc2:
+        if not highest_rpe.empty:
+            r = highest_rpe.iloc[0]
+            st.metric("Highest Dept RPE", r["Dept_Name"], _money(r["Dept_RPE"], currency))
+    with rc3:
+        if not cost_watch.empty:
+            r = cost_watch.iloc[0]
+            st.metric("Cost Watch", r["Dept_Name"], f"{r['Cost_Intensity']:.1%} cost/revenue")
+
+    with st.expander("How to read Department Productivity Map"):
+        st.markdown(
+            """
+            - **Bubble besar** = revenue departemen besar.
+            - **Semakin ke kanan** = headcount semakin banyak.
+            - **Semakin ke atas** = manpower cost semakin tinggi.
+            - **Hijau** = Revenue Generator, **Biru** = Revenue Enabler, **Oranye** = Support Function, **Ungu** = Governance.
+            - Idealnya revenue besar tidak selalu diikuti cost yang terlalu tinggi.
+            - Bubble kecil tetapi berada tinggi perlu ditinjau karena berpotensi **high cost - low revenue**.
+            """
+        )
+
+    topn = st.slider("Top N Department Table", 3, 20, 8)
+    dept_show = dept[["Dept_ID", "Dept_Name", "Function_Group", "FJA_Category", "Headcount", "Manpower_Cost", "Dept_Revenue", "Dept_RPE", "Revenue_per_Cost", "Cost_per_HC"]].copy()
+    st.dataframe(dept_show.sort_values("Manpower_Cost", ascending=False).head(topn), use_container_width=True, hide_index=True)
+
+# =========================
+# CAPACITY RISK CENTER
+# =========================
+st.markdown("## 5. Capacity Risk Center")
+
+cap = data["capacity"].copy()
+cap_year = cap[cap["Year"] == year_sel].copy() if not cap.empty else pd.DataFrame()
+cc1, cc2 = st.columns([1.2, 1.0])
+with cc1:
+    if not cap_year.empty:
+        fig = px.scatter(
+            cap_year,
+            x="Avg_Utilization_Pct",
+            y="Overtime_Hours",
+            size="Backlog_Count",
+            color="Critical_Role_Dependency",
+            hover_data=["Dept_ID", "SLA_Breach_Count", "Incident_Count", "Turnover_Count"],
+            title=f"Capacity Risk Heatmap Proxy — {year_sel}",
+        )
+        fig.update_xaxes(tickformat=".0%")
+        fig.update_layout(margin=dict(l=10, r=10, t=45, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("CAPACITY_INDICATOR belum diisi.")
+with cc2:
+    st.markdown("#### Capacity Reading")
+    st.metric("Capacity Score", f"{cr['score']}/100", cr["state"])
+    st.write(f"**Recommendation:** {cr.get('recommendation', '-')}")
+    st.write(cr["hint"])
+
+    d = cr.get("details", {})
+    d1, d2 = st.columns(2)
+    with d1:
+        st.metric("Max Utilization", _pct(d.get("max_utilization")))
+        st.metric("Overtime Hours", _num(d.get("total_overtime")))
+        st.metric("Backlog", _num(d.get("total_backlog")))
+    with d2:
+        st.metric("SLA Breach", _num(d.get("total_sla_breach")))
+        st.metric("Turnover", _num(d.get("total_turnover")))
+        st.metric("Dependency", d.get("critical_dependency", "-"))
+
+    if cr["state"] == "LOW":
+        st.success("Kapasitas organisasi masih memadai. Tidak ada indikasi bottleneck besar.")
+    elif cr["state"] == "MEDIUM":
+        st.warning("Mulai ada tekanan kapasitas pada beberapa fungsi. Monitoring utilisasi, backlog, dan overtime perlu diperketat.")
+    elif cr["state"] == "HIGH":
+        st.warning("Beberapa fungsi menunjukkan tanda bottleneck. Perlu capacity expansion review dan selective hiring pada fungsi kritikal.")
+    else:
+        st.error("Risiko overload organisasi tinggi dan berpotensi mempengaruhi SLA, kualitas delivery, serta keberlanjutan operasional.")
+
+    with st.expander("How to Read Capacity Risk Score"):
+        st.markdown("""
+        ### Capacity Score Classification
+
+        | Score | Status | Board Meaning |
+        |---:|---|---|
+        | **0-30** | **LOW** | Kapasitas masih longgar / terkendali |
+        | **31-55** | **MEDIUM** | Ada tekanan kapasitas namun masih terkendali |
+        | **56-75** | **HIGH** | Bottleneck mulai muncul; perlu capacity review |
+        | **76-100** | **CRITICAL** | Risiko overload organisasi; perlu tindakan segera |
+
+        ### Scoring Weight
+
+        | Faktor | Bobot Maksimum |
+        |---|---:|
+        | Utilization | 25 |
+        | Overtime | 20 |
+        | Backlog | 20 |
+        | SLA Breach | 15 |
+        | Turnover | 10 |
+        | Critical Role Dependency | 10 |
+
+        ### Bubble Chart Reading
+
+        - **X Axis** = Average Utilization %
+        - **Y Axis** = Overtime Hours
+        - **Bubble Size** = Backlog Count
+        - **Bubble Color** = Critical Role Dependency
+
+        **Kanan atas** adalah area paling berisiko: utilisasi tinggi, overtime tinggi, dan backlog besar.
+        """)
+
+# =========================
+# PROJECT / MARGIN QUALITY
+# =========================
+st.markdown("## 6. Margin Quality & Project Profitability")
+
+pm = data["project_margin"].copy()
+pm_year = pm[pm["Year"] == year_sel].copy() if not pm.empty else pd.DataFrame()
+mc1, mc2 = st.columns(2)
+with mc1:
+    fig = px.line(yr_range, x="Year", y="Gross_Margin_Pct", markers=True, title="Gross Margin Trend")
+    fig.update_yaxes(tickformat=".0%")
+    fig.update_layout(margin=dict(l=10, r=10, t=45, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+with mc2:
+    if not pm_year.empty:
+        fig = px.bar(pm_year.sort_values("Gross_Margin_Pct"), x="Project_ID", y="Gross_Margin_Pct", color="Business_Line", title=f"Project Gross Margin — {year_sel}")
+        fig.update_yaxes(tickformat=".0%")
+        fig.update_layout(margin=dict(l=10, r=10, t=45, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("PROJECT_MARGIN belum diisi.")
+
+
+with st.expander("How to Read Margin Quality & Project Profitability"):
+    st.markdown("""
+    - **Gross Margin Trend** menunjukkan kualitas profit dari waktu ke waktu.
+    - **Project Gross Margin** menunjukkan project mana yang memberikan margin kuat atau menekan profit.
+    - Klasifikasi umum:
+      - **>35% = Strong**
+      - **25-35% = Healthy**
+      - **15-25% = Watch**
+      - **10-15% = Pressure**
+      - **<10% = Critical**
+    - Revenue besar belum tentu sehat jika gross margin rendah.
+    - Jika margin turun sementara revenue naik, cek **pricing, COGS, scope creep, rework, subcontractor cost, dan delivery cost**.
+    """)
+
+# =========================
+# WHAT-IF SIMULATOR
+# =========================
+st.markdown("## 7. What-if Simulator")
+
+s1, s2, s3 = st.columns(3)
+with s1:
+    add_hc = st.slider("Additional Headcount", 0, 50, 5)
+with s2:
+    avg_cost = st.number_input("Avg Annual Cost per New HC", min_value=0.0, value=float(latest.get("Cost_per_HC") if pd.notna(latest.get("Cost_per_HC")) else 75_000_000), step=5_000_000.0)
+with s3:
+    revenue_uplift = st.slider("Expected Revenue Uplift", -0.20, 1.00, 0.10, step=0.01, format="%.2f")
+
+proj_revenue = latest.get("Total_Revenue") * (1 + revenue_uplift)
+proj_cost = latest.get("Total_Manpower_Cost") + add_hc * avg_cost
+proj_hc = latest.get("Total_Headcount") + add_hc
+proj_rpe = proj_revenue / proj_hc if proj_hc else np.nan
+proj_mcr = proj_cost / proj_revenue if proj_revenue else np.nan
+
+wc1, wc2, wc3 = st.columns(3)
+with wc1:
+    st.metric("Projected Revenue", _money(proj_revenue, currency), _pct(revenue_uplift))
+with wc2:
+    st.metric("Projected RPE", _money(proj_rpe, currency), f"{((proj_rpe/latest.get('RPE'))-1)*100:+.1f}%" if latest.get("RPE") else "")
+with wc3:
+    st.metric("Projected MCR", _pct(proj_mcr), _pp(proj_mcr - latest.get("MCR_Pct")))
+
+st.caption("Simulator ini directional. Untuk keputusan formal, validasi dengan pipeline, backlog, delivery capacity, dan margin per project.")
+
+
+with st.expander("How to Read What-if Simulator"):
+    st.markdown("""
+    - **Additional Headcount** = simulasi tambahan jumlah orang.
+    - **Avg Annual Cost per New HC** = estimasi biaya tahunan per orang baru.
+    - **Expected Revenue Uplift** = asumsi kenaikan revenue akibat tambahan kapasitas/growth.
+    - **Projected Revenue** = revenue setelah uplift.
+    - **Projected RPE** = produktivitas per orang setelah tambahan HC.
+    - **Projected MCR** = dampak tambahan HC terhadap manpower cost ratio.
+    - Interpretasi utama: hiring layak jika **Projected Revenue dan RPE membaik** serta **Projected MCR tetap dalam zona sehat/watch yang dapat diterima**.
+    - Simulator ini bersifat directional; keputusan final tetap perlu validasi pipeline, backlog, SLA, dan margin per project.
+    """)
+
+# =========================
+# BOARD DECISION CENTER
+# =========================
+st.markdown("## 8. Board Decision Center")
+
+board_score = board_score_engine(latest, targets, cr["state"])
+board_confidence = str(period_info.get("Data_Confidence", "High"))
+
+bd1, bd2 = st.columns([0.95, 1.25])
+with bd1:
+    st.markdown(
+        board_status_card_html(
+            board_score,
+            board_confidence,
+            mq["state"],
+            mh["state"],
+            cr["state"],
+        ),
+        unsafe_allow_html=True,
+    )
+
+with bd2:
+    fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=board_score["score"],
+            number={"suffix": "/100"},
+            title={"text": f"Board Score — {board_score['label']}"},
+            gauge={
+                "axis": {"range": [0, 100]},
+                "bar": {"color": TONE_COLOR.get(board_score.get("tone", "info"), "#3b82f6")},
+                "steps": [
+                    {"range": [0, 40], "color": "rgba(239,68,68,.18)"},
+                    {"range": [40, 55], "color": "rgba(245,158,11,.18)"},
+                    {"range": [55, 70], "color": "rgba(234,179,8,.18)"},
+                    {"range": [70, 85], "color": "rgba(59,130,246,.18)"},
+                    {"range": [85, 100], "color": "rgba(34,197,94,.18)"},
+                ],
+                "threshold": {
+                    "line": {"color": "#0f172a", "width": 3},
+                    "thickness": 0.75,
+                    "value": board_score["score"],
+                },
+            },
+        )
+    )
+    fig.update_layout(height=260, margin=dict(l=10, r=10, t=50, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("#### Executive Interpretation")
+st.info(board_status_interpretation(board_score, bp["state"], mq["state"], mh["state"], cr["state"]))
+
+comp = pd.DataFrame({
+    "Factor": list(board_score["components"].keys()),
+    "Score": list(board_score["components"].values()),
+    "Weight": [board_score["weights"][k] for k in board_score["components"].keys()],
+})
+comp["Weighted_Score"] = comp["Score"] * comp["Weight"]
+
+bc1, bc2 = st.columns([1.1, 1.0])
+with bc1:
+    fig = px.bar(
+        comp,
+        x="Factor",
+        y="Score",
+        text="Score",
+        title="Board Score Components",
+        hover_data=["Weight", "Weighted_Score"],
+    )
+    fig.update_yaxes(range=[0, 100])
+    fig.update_layout(margin=dict(l=10, r=10, t=45, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+with bc2:
+    st.markdown(f"#### Recommended Action: {board_score['label']}")
+    actions_v3 = board_action_v3(board_score, bp["state"], mq["state"], mh["state"], cr["state"])
+    for i, a in enumerate(actions_v3, start=1):
+        st.write(f"{i}. {a}")
+
+trend = yr_range.copy()
+trend["Business_Posture"] = trend.apply(lambda r: business_posture(r.get("Revenue_YoY"), r.get("Headcount_YoY"), r.get("RPE_YoY"), r.get("MCR_Pct"), targets)["state"], axis=1)
+trend["Margin_Quality"] = trend["Gross_Margin_Pct"].apply(lambda x: margin_quality(x, targets)["state"])
+trend["MCR_Health"] = trend["MCR_Pct"].apply(lambda x: mcr_health(x, targets)["state"])
+
+# Build capacity state per trend year using the same engine.
+_cap_states = []
+_board_scores = []
+_board_labels = []
+for _, r in trend.iterrows():
+    _cr = capacity_risk(r, data["capacity"], targets)
+    _bs = board_score_engine(r, targets, _cr["state"])
+    _cap_states.append(_cr["state"])
+    _board_scores.append(_bs["score"])
+    _board_labels.append(_bs["label"])
+
+trend["Capacity_Risk"] = _cap_states
+trend["Board_Score"] = _board_scores
+trend["Board_Status"] = _board_labels
+
+st.markdown("#### Board Status Trend")
+tc1, tc2 = st.columns([1.2, 1.0])
+with tc1:
+    fig = px.line(
+        trend,
+        x="Year",
+        y="Board_Score",
+        markers=True,
+        color="Board_Status",
+        title="Board Score Trend",
+        hover_data=["Business_Posture", "Margin_Quality", "MCR_Health", "Capacity_Risk", "Revenue_YoY", "RPE_YoY", "MCR_Pct", "Gross_Margin_Pct"],
+    )
+    fig.add_hrect(y0=85, y1=100, line_width=0, fillcolor="rgba(34,197,94,.08)")
+    fig.add_hrect(y0=70, y1=85, line_width=0, fillcolor="rgba(59,130,246,.08)")
+    fig.add_hrect(y0=55, y1=70, line_width=0, fillcolor="rgba(234,179,8,.08)")
+    fig.add_hrect(y0=40, y1=55, line_width=0, fillcolor="rgba(245,158,11,.08)")
+    fig.add_hrect(y0=0, y1=40, line_width=0, fillcolor="rgba(239,68,68,.08)")
+    fig.update_yaxes(range=[0, 100])
+    fig.update_layout(margin=dict(l=10, r=10, t=45, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+with tc2:
+    status_summary = trend[["Year", "Board_Score", "Board_Status", "Business_Posture", "Margin_Quality", "MCR_Health", "Capacity_Risk"]].copy()
+    st.dataframe(status_summary, use_container_width=True, hide_index=True)
+
+with st.expander("How to read Board Score"):
+    st.markdown(
+        """
+        **Board Score** adalah ringkasan directional untuk keputusan Direksi, bukan pengganti analisis detail.
+
+        Bobot:
+        - Revenue Growth: 25%
+        - RPE Growth: 25%
+        - Margin Quality: 20%
+        - MCR Health: 15%
+        - Capacity Risk: 15%
+
+        Status:
+        - **85–100 Growth Ready**: siap scale-up terukur.
+        - **70–85 Optimize Growth**: growth ada, fokus optimasi margin/kapasitas.
+        - **55–70 Selective Hiring**: boleh hiring terbatas pada bottleneck.
+        - **40–55 Capacity Alert**: audit kapasitas sebelum ekspansi.
+        - **<40 Defensive Mode**: proteksi margin, cash, dan fungsi kritikal.
+        """
+    )
+
+
+
+# =========================
+# STRATEGIC DECISION ADD-ONS
+# =========================
+st.markdown("## 9. Strategic Decision Add-ons")
+st.caption("Section ini menjawab: mengapa KPI berubah, apakah perlu hiring, berapa batas HC yang sehat, dan apa keputusan 90 hari ke depan.")
+
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "Management Insight",
+    "Hiring Decision",
+    "Scenario Simulator",
+    "CEO One-Page",
+    "12-Month Roadmap",
+    "Executive Closing"
+])
+
+with tab1:
+    st.markdown("### Management Insight Engine")
+    insights = build_management_insights(latest, prev, bp, mq, mh, cr, currency)
+
+    miv1, miv2 = st.columns([1.1, 1.0])
+    with miv1:
+        movement_df = make_kpi_movement_df(latest)
+        fig = px.bar(
+            movement_df,
+            x="Metric",
+            y="Value_Pct",
+            color="Type",
+            text=movement_df["Value_Pct"].map(lambda x: "" if pd.isna(x) else f"{x:.1f}%"),
+            title="KPI Movement Driver",
+            labels={"Value_Pct": "Growth / Delta (pp)", "Metric": ""},
+        )
+        fig.add_hline(y=0, line_dash="dot", line_color="gray")
+        fig.update_layout(margin=dict(l=10, r=10, t=45, b=10), height=380)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with miv2:
+        priority_df = make_decision_priority_df(bp, mq, mh, cr)
+        fig = px.bar(
+            priority_df.sort_values("Priority"),
+            x="Priority",
+            y="Area",
+            color="Status",
+            orientation="h",
+            text="Status",
+            title="Management Attention Map",
+            labels={"Priority": "Priority score", "Area": ""},
+        )
+        fig.update_xaxes(range=[0, 100])
+        fig.update_layout(margin=dict(l=10, r=10, t=45, b=10), height=380)
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("#### Insight Narrative")
+    for item in insights:
+        tone = _tone_from_status(item["status"])
+        box = st.success if tone == "success" else st.error if tone == "error" else st.warning if tone == "warning" else st.info
+        box(f"**{item['title']}** — {item['why']}\n\n**Meaning:** {item['meaning']}\n\n**Action:** {item['action']}")
+
+    with st.expander("How to Read Management Insight Engine"):
+        st.markdown("""
+        - **KPI Movement Driver** membantu melihat apakah perubahan KPI disebabkan oleh revenue, HC, RPE, MCR, atau margin.
+        - **Management Attention Map** memprioritaskan area yang harus dibahas Direksi.
+        - Insight narrative menjelaskan **why, meaning, dan action** agar dashboard tidak berhenti di angka.
+        - Jika Revenue Growth lebih kecil dari Headcount Growth, growth belum cukup produktif.
+        - Jika MCR rendah tetapi Capacity Risk tinggi, efisiensi bisa menyembunyikan overload.
+        """)
+
+with tab2:
+    st.markdown("### Hiring Decision Engine")
+    hire_df = hiring_decision_engine(data["dept"], data["capacity"], year_sel, targets)
+
+    if hire_df.empty:
+        st.info("Data Department/Capacity belum cukup untuk menghasilkan hiring recommendation.")
+    else:
+        rec_summary = hire_df["Recommendation"].value_counts().reset_index()
+        rec_summary.columns = ["Recommendation", "Count"]
+        hc1, hc2 = st.columns([0.7, 1.3])
+        with hc1:
+            fig = px.pie(rec_summary, names="Recommendation", values="Count", title="Hiring Recommendation Mix")
+            fig.update_layout(margin=dict(l=10, r=10, t=45, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+        with hc2:
+            show = hire_df.copy()
+            for col in ["Manpower_Cost", "Dept_Revenue"]:
+                if col in show.columns:
+                    show[col] = show[col].map(lambda x: _money(x, currency))
+            if "Revenue_per_Cost" in show.columns:
+                show["Revenue_per_Cost"] = show["Revenue_per_Cost"].map(lambda x: "-" if pd.isna(x) else f"{x:.2f}x")
+            if "Avg_Utilization" in show.columns:
+                show["Avg_Utilization"] = show["Avg_Utilization"].map(_pct)
+            st.dataframe(show, use_container_width=True, hide_index=True)
+
+            hv1, hv2 = st.columns(2)
+            with hv1:
+                fig = px.bar(
+                    rec_summary,
+                    x="Recommendation",
+                    y="Count",
+                    text="Count",
+                    title="Hiring Decision Count",
+                    labels={"Count": "Department count"},
+                )
+                fig.update_layout(margin=dict(l=10, r=10, t=45, b=10), height=330)
+                st.plotly_chart(fig, use_container_width=True)
+            with hv2:
+                scatter_df = hire_df.copy()
+                if "Avg_Utilization" in scatter_df.columns and "Revenue_per_Cost" in scatter_df.columns:
+                    scatter_df["Avg_Utilization"] = pd.to_numeric(scatter_df["Avg_Utilization"], errors="coerce")
+                    scatter_df["Revenue_per_Cost"] = pd.to_numeric(scatter_df["Revenue_per_Cost"], errors="coerce")
+                    scatter_df["Headcount"] = pd.to_numeric(scatter_df.get("Headcount"), errors="coerce").fillna(1).clip(lower=1)
+                    fig = px.scatter(
+                        scatter_df,
+                        x="Avg_Utilization",
+                        y="Revenue_per_Cost",
+                        size="Headcount",
+                        color="Recommendation",
+                        hover_name="Dept_Name",
+                        hover_data=["FJA_Category", "Overtime", "Backlog", "SLA_Breach"],
+                        title="Hiring Priority Map",
+                        labels={"Avg_Utilization": "Utilization", "Revenue_per_Cost": "Revenue per Cost"},
+                    )
+                    fig.update_xaxes(tickformat=".0%")
+                    fig.update_layout(margin=dict(l=10, r=10, t=45, b=10), height=330)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Utilization atau Revenue per Cost belum tersedia untuk priority map.")
+
+    with st.expander("How to Read Hiring Decision Engine"):
+        st.markdown("""
+        - **HIRE** = ada sinyal bottleneck/capacity pressure pada fungsi revenue/delivery.
+        - **SELECTIVE** = hiring boleh, tetapi harus berbasis pipeline, backlog, SLA, atau ROI.
+        - **HOLD** = belum ada sinyal kuat untuk menambah HC.
+        - **FREEZE** = jangan tambah HC dulu; optimasi proses atau review cost lebih dulu.
+        - Engine ini memakai kombinasi FJA Category, Dept Revenue, Revenue per Cost, utilization, overtime, backlog, dan SLA.
+        """)
+
+with tab3:
+    st.markdown("### Scenario Simulator Plus")
+    guard = compute_hc_guardrails(latest, targets)
+
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    with sc1:
+        st.metric("Target MCR", _pct(guard["target_mcr"]))
+    with sc2:
+        st.metric("Max HC at Target MCR", _num(guard["max_hc"]))
+    with sc3:
+        st.metric("HC Capacity Left", _num(guard["additional_hc_capacity"]))
+    with sc4:
+        st.metric("Revenue Required", _money(guard["required_revenue"], currency))
+
+    sim1, sim2, sim3 = st.columns(3)
+    with sim1:
+        add_hc_plus = st.slider("Scenario: Additional HC", 0, 100, 5, key="strategic_add_hc")
+    with sim2:
+        revenue_growth_plus = st.slider("Scenario: Revenue Growth", -0.30, 1.00, 0.10, step=0.01, key="strategic_rev_growth")
+    with sim3:
+        avg_cost_plus = st.number_input(
+            "Scenario: Avg Cost per New HC",
+            min_value=0.0,
+            value=float(latest.get("Cost_per_HC") if pd.notna(latest.get("Cost_per_HC")) else 75_000_000),
+            step=5_000_000.0,
+            key="strategic_avg_cost"
+        )
+
+    sim_revenue = latest.get("Total_Revenue") * (1 + revenue_growth_plus)
+    sim_manpower_cost = latest.get("Total_Manpower_Cost") + (add_hc_plus * avg_cost_plus)
+    sim_hc = latest.get("Total_Headcount") + add_hc_plus
+    sim_rpe = sim_revenue / sim_hc if sim_hc else np.nan
+    sim_mcr = sim_manpower_cost / sim_revenue if sim_revenue else np.nan
+
+    sr1, sr2, sr3, sr4 = st.columns(4)
+    with sr1:
+        st.metric("Scenario Revenue", _money(sim_revenue, currency), _pct(revenue_growth_plus))
+    with sr2:
+        st.metric("Scenario HC", _num(sim_hc), f"+{add_hc_plus}")
+    with sr3:
+        st.metric("Scenario RPE", _money(sim_rpe, currency))
+    with sr4:
+        st.metric("Scenario MCR", _pct(sim_mcr), _pp(sim_mcr - latest.get("MCR_Pct")))
+
+    curve = scenario_curve_df(latest, revenue_growth_plus, avg_cost_plus, max_hc=40)
+    cv1, cv2 = st.columns(2)
+    with cv1:
+        fig = px.line(
+            curve,
+            x="Additional_HC",
+            y="Projected_MCR",
+            markers=True,
+            title="MCR Sensitivity by Additional HC",
+            labels={"Projected_MCR": "Projected MCR", "Additional_HC": "Additional HC"},
+        )
+        fig.add_hline(y=get_target(targets, "MCR_Healthy_Max", 0.07), line_dash="dash", annotation_text="Healthy max")
+        fig.add_hline(y=get_target(targets, "MCR_Watch_Max", 0.09), line_dash="dot", annotation_text="Watch max")
+        fig.update_yaxes(tickformat=".0%")
+        fig.update_layout(margin=dict(l=10, r=10, t=45, b=10), height=360)
+        st.plotly_chart(fig, use_container_width=True)
+    with cv2:
+        fig = px.line(
+            curve,
+            x="Additional_HC",
+            y="Projected_RPE",
+            markers=True,
+            title="RPE Sensitivity by Additional HC",
+            labels={"Projected_RPE": "Projected RPE", "Additional_HC": "Additional HC"},
+        )
+        fig.update_layout(margin=dict(l=10, r=10, t=45, b=10), height=360)
+        st.plotly_chart(fig, use_container_width=True)
+
+    if pd.notna(sim_mcr):
+        if sim_mcr <= get_target(targets, "MCR_Healthy_Max", 0.07):
+            st.success("Scenario masih dalam zona MCR sehat.")
+        elif sim_mcr <= get_target(targets, "MCR_Watch_Max", 0.09):
+            st.warning("Scenario masuk zona watch. Masih bisa diterima, tetapi perlu guardrail.")
+        else:
+            st.error("Scenario berisiko menekan MCR. Validasi revenue pipeline sebelum hiring.")
+
+    with st.expander("How to Read Scenario Simulator Plus"):
+        st.markdown("""
+        - **MCR Sensitivity** menunjukkan batas tambahan HC sebelum MCR melewati target sehat/watch.
+        - **RPE Sensitivity** menunjukkan apakah tambahan HC menurunkan produktivitas per orang.
+        - Gunakan grafik ini untuk menjawab: *kalau tambah orang, MCR dan RPE jadi seperti apa?*
+        - Hiring layak jika MCR tetap sehat/watch dan RPE tidak turun material.
+        """)
+
+with tab4:
+    st.markdown("### CEO One-Page")
+    ceo1, ceo2, ceo3 = st.columns(3)
+    ceo4, ceo5, ceo6 = st.columns(3)
+    with ceo1:
+        st.metric("Revenue", _money(latest.get("Total_Revenue"), currency), _pct(latest.get("Revenue_YoY")))
+    with ceo2:
+        st.metric("RPE", _money(latest.get("RPE"), currency), _pct(latest.get("RPE_YoY")))
+    with ceo3:
+        st.metric("MCR", _pct(latest.get("MCR_Pct")), mh["state"])
+    with ceo4:
+        st.metric("Gross Margin", _pct(latest.get("Gross_Margin_Pct")), mq["state"])
+    with ceo5:
+        st.metric("Capacity", cr["state"], f"{cr['score']}/100")
+    with ceo6:
+        st.metric("Board Decision", board_score["label"], f"{board_score['score']}/100")
+
+    ceov1, ceov2 = st.columns([0.9, 1.1])
+    with ceov1:
+        fig = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=board_score["score"],
+            number={"suffix": "/100"},
+            title={"text": f"Board Score - {board_score['label']}"},
+            gauge={
+                "axis": {"range": [0, 100]},
+                "bar": {"color": TONE_COLOR.get(board_score.get("tone", "info"), "#3b82f6")},
+                "steps": [
+                    {"range": [0, 40], "color": "rgba(239,68,68,.18)"},
+                    {"range": [40, 55], "color": "rgba(245,158,11,.18)"},
+                    {"range": [55, 70], "color": "rgba(234,179,8,.18)"},
+                    {"range": [70, 85], "color": "rgba(59,130,246,.18)"},
+                    {"range": [85, 100], "color": "rgba(34,197,94,.18)"},
+                ],
+            },
+        ))
+        fig.update_layout(height=320, margin=dict(l=10, r=10, t=45, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    with ceov2:
+        ceo_health = pd.DataFrame([
+            {"Area": "Revenue Growth", "Score": board_score["components"].get("Revenue Growth", 0)},
+            {"Area": "RPE Growth", "Score": board_score["components"].get("RPE Growth", 0)},
+            {"Area": "Margin Quality", "Score": board_score["components"].get("Margin Quality", 0)},
+            {"Area": "MCR Health", "Score": board_score["components"].get("MCR Health", 0)},
+            {"Area": "Capacity Risk", "Score": board_score["components"].get("Capacity Risk", 0)},
+        ])
+        fig = px.bar(
+            ceo_health.sort_values("Score"),
+            x="Score",
+            y="Area",
+            orientation="h",
+            text="Score",
+            title="CEO Health Snapshot",
+            labels={"Score": "Score", "Area": ""},
+        )
+        fig.update_xaxes(range=[0, 100])
+        fig.update_layout(height=320, margin=dict(l=10, r=10, t=45, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("#### CEO Message")
+    st.info(executive_closing_text(latest, bp, mq, mh, cr, targets, currency))
+
+with tab5:
+    st.markdown("### 12-Month Roadmap")
+    roadmap = build_roadmap(latest, bp, mq, mh, cr)
+    st.dataframe(roadmap, use_container_width=True, hide_index=True)
+
+    with st.expander("How to Read 12-Month Roadmap"):
+        st.markdown("""
+        - **0–3 Months** = tindakan korektif segera untuk risiko MCR, margin, atau capacity.
+        - **3–6 Months** = eksekusi selective hiring, productivity program, dan process improvement.
+        - **6–12 Months** = organization review, succession planning, dan capability building.
+        - Roadmap berubah mengikuti status MCR, Margin, Business Posture, dan Capacity Risk.
+        """)
+
+with tab6:
+    st.markdown("### Executive Closing Report")
+    st.info(executive_closing_text(latest, bp, mq, mh, cr, targets, currency))
+
+    st.markdown("#### Top 3 Decisions")
+    decisions = []
+    if cr["state"] in ["HIGH", "CRITICAL"]:
+        decisions.append("1. Prioritaskan capacity review dan selective hiring pada fungsi bottleneck.")
+    if mh["state"] in ["COST_PRESSURE", "CRITICAL"]:
+        decisions.append("2. Freeze non-critical hiring dan review manpower cost.")
+    if mq["state"] in ["WATCH", "PRESSURE", "CRITICAL"]:
+        decisions.append("3. Jalankan margin quality review untuk pricing, COGS, dan delivery cost.")
+    if not decisions:
+        decisions = [
+            "1. Lanjutkan growth secara selektif dengan MCR sebagai guardrail.",
+            "2. Hiring hanya untuk fungsi revenue/delivery yang terbukti bottleneck.",
+            "3. Pertahankan margin project dan monitor capacity risk setiap bulan."
+        ]
+
+    for d in decisions[:3]:
+        st.write(d)
+
+
+    st.markdown("#### Decision Priority Visual")
+    decision_priority = make_decision_priority_df(bp, mq, mh, cr)
+    pv1, pv2 = st.columns(2)
+    with pv1:
+        fig = px.bar(
+            decision_priority.sort_values("Priority"),
+            x="Priority",
+            y="Area",
+            color="Status",
+            orientation="h",
+            text="Status",
+            title="Executive Closing Priority",
+            labels={"Priority": "Priority score", "Area": ""},
+        )
+        fig.update_xaxes(range=[0, 100])
+        fig.update_layout(height=340, margin=dict(l=10, r=10, t=45, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    with pv2:
+        roadmap_for_chart = build_roadmap(latest, bp, mq, mh, cr)
+        if not roadmap_for_chart.empty:
+            prio_df = roadmap_for_chart["Priority"].value_counts().reset_index()
+            prio_df.columns = ["Priority", "Count"]
+            fig = px.pie(prio_df, names="Priority", values="Count", title="Roadmap Priority Mix")
+            fig.update_layout(height=340, margin=dict(l=10, r=10, t=45, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("#### Board-ready Statement")
+    st.success(
+        "Rekomendasi akhir: perusahaan sebaiknya tidak melakukan ekspansi HC secara umum. "
+        "Tambahan manpower hanya dilakukan pada fungsi yang terbukti memiliki bottleneck, backlog, SLA pressure, "
+        "atau kontribusi langsung terhadap revenue. Target utama adalah menjaga MCR tetap sehat, meningkatkan RPE, "
+        "dan memastikan revenue growth tidak mengorbankan margin maupun kapasitas delivery."
+    )
+
+
+
+# =========================
+# SEP V4 EXECUTIVE INTELLIGENCE
+# =========================
+st.markdown("## 10. SEP V4 Executive Intelligence")
+st.caption("Starcom Executive Platform (SEP) V4 mengubah dashboard HR vs Revenue menjadi executive decision intelligence: health index, portfolio, risk, decision cards, dan presentation mode.")
+
+sep_health = sep_company_health_index(latest, bp, mq, mh, cr, board_score)
+sep_portfolio = sep_workforce_portfolio(data["dept"], year_sel)
+sep_risks = sep_risk_matrix(bp, mq, mh, cr, latest)
+sep_cards = sep_decision_cards(latest, bp, mq, mh, cr, board_score)
+sep_flow = sep_presentation_flow(latest, sep_health, board_score)
+
+v4tab1, v4tab2, v4tab3, v4tab4, v4tab5 = st.tabs(["Executive Cockpit", "Workforce Portfolio", "Risk & Decision Matrix", "Presentation Mode", "Executive Pack"])
+
+with v4tab1:
+    st.markdown("### SEP V4 Executive Cockpit")
+    ec1, ec2 = st.columns([0.8, 1.2])
+    with ec1:
+        fig = go.Figure(go.Indicator(mode="gauge+number", value=sep_health["score"], number={"suffix": "/100"}, title={"text": f"Company Health - {sep_health['label']}"}, gauge={"axis": {"range": [0, 100]}, "bar": {"color": TONE_COLOR.get(sep_health.get("tone", "info"), "#3b82f6")}, "steps": [{"range": [0, 40], "color": "rgba(239,68,68,.18)"}, {"range": [40, 55], "color": "rgba(245,158,11,.18)"}, {"range": [55, 70], "color": "rgba(234,179,8,.18)"}, {"range": [70, 85], "color": "rgba(59,130,246,.18)"}, {"range": [85, 100], "color": "rgba(34,197,94,.18)"}]}))
+        fig.update_layout(height=340, margin=dict(l=10, r=10, t=45, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    with ec2:
+        radar_df = sep_health["components"].copy()
+        fig = go.Figure()
+        fig.add_trace(go.Scatterpolar(r=radar_df["Score"].tolist() + [radar_df["Score"].tolist()[0]], theta=radar_df["Area"].tolist() + [radar_df["Area"].tolist()[0]], fill="toself", name="SEP Health"))
+        fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=False, title="Executive KPI Radar", height=340, margin=dict(l=10, r=10, t=45, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    st.markdown("#### Health Components")
+    hc_cols = st.columns(3)
+    for i, row in sep_health["components"].iterrows():
+        with hc_cols[i % 3]:
+            st.markdown(sep_score_bar(row["Area"], int(row["Score"]), sep_health.get("tone", "info")), unsafe_allow_html=True)
+    with st.expander("How to Read SEP Executive Cockpit"):
+        st.markdown("""
+        - **Company Health Index** menggabungkan revenue growth, RPE growth, margin quality, MCR health, capacity risk, dan business posture.
+        - **Executive KPI Radar** memperlihatkan area yang kuat dan area yang lemah dalam satu visual.
+        - Jika radar tidak seimbang, presentasi harus fokus pada area yang paling rendah terlebih dahulu.
+        """)
+
+with v4tab2:
+    st.markdown("### Workforce Portfolio Analysis")
+    if sep_portfolio.empty:
+        st.info("Data department belum cukup untuk Workforce Portfolio Analysis.")
+    else:
+        p1, p2 = st.columns([1.15, 0.85])
+        with p1:
+            plot_df = sep_portfolio.copy()
+            plot_df["Revenue_per_Cost"] = pd.to_numeric(plot_df.get("Revenue_per_Cost"), errors="coerce")
+            plot_df["Manpower_Cost"] = pd.to_numeric(plot_df.get("Manpower_Cost"), errors="coerce").fillna(0)
+            plot_df["Headcount"] = pd.to_numeric(plot_df.get("Headcount"), errors="coerce").fillna(1).clip(lower=1)
+            fig = px.scatter(plot_df, x="Manpower_Cost", y="Revenue_per_Cost", size="Headcount", color="Portfolio_Quadrant", hover_name="Dept_Name", hover_data=["FJA_Category", "Dept_Revenue", "Dept_RPE", "Cost_per_HC"], title="Workforce Portfolio Matrix", labels={"Manpower_Cost": "Manpower Cost", "Revenue_per_Cost": "Revenue per Cost"}, size_max=56)
+            fig.update_layout(height=440, margin=dict(l=10, r=10, t=45, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+        with p2:
+            qsum = sep_portfolio["Portfolio_Quadrant"].value_counts().reset_index()
+            qsum.columns = ["Quadrant", "Count"]
+            fig = px.pie(qsum, names="Quadrant", values="Count", title="Portfolio Mix")
+            fig.update_layout(height=320, margin=dict(l=10, r=10, t=45, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(sep_portfolio[["Dept_Name", "FJA_Category", "Portfolio_Quadrant", "Headcount", "Manpower_Cost", "Dept_Revenue", "Revenue_per_Cost"]], use_container_width=True, hide_index=True)
+    with st.expander("How to Read Workforce Portfolio Matrix"):
+        st.markdown("""
+        - **Strategic Engine**: revenue/cost tinggi tetapi cost juga besar; pertahankan dan optimalkan.
+        - **Scale / Protect**: revenue/cost tinggi dengan cost relatif rendah; kandidat scale-up.
+        - **Optimize / Review**: cost tinggi tetapi revenue/cost rendah; perlu review struktur dan output.
+        - **Maintain / Automate**: cost dan revenue leverage rendah; pertahankan efisien, gunakan automation bila memungkinkan.
+        """)
+
+with v4tab3:
+    st.markdown("### Executive Risk & Decision Matrix")
+    r1, r2 = st.columns([1.05, 0.95])
+    with r1:
+        fig = px.scatter(sep_risks, x="Probability", y="Impact", size="Impact", color="Risk", hover_data=["Owner", "Mitigation"], title="Executive Risk Matrix", labels={"Probability": "Probability", "Impact": "Impact"}, size_max=50)
+        fig.add_hline(y=60, line_dash="dot")
+        fig.add_vline(x=60, line_dash="dot")
+        fig.update_xaxes(range=[0, 100])
+        fig.update_yaxes(range=[0, 100])
+        fig.update_layout(height=420, margin=dict(l=10, r=10, t=45, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    with r2:
+        st.markdown("#### Executive Decision Cards")
+        for _, row in sep_cards.iterrows():
+            st.markdown(f"""
+                <div style="border:1px solid rgba(148,163,184,.35); border-radius:16px; padding:14px; margin-bottom:10px; background:rgba(15,23,42,.035);">
+                    <div style="font-size:12px; color:#64748b; text-transform:uppercase; letter-spacing:.08em;">{row['Decision']}</div>
+                    <div style="font-size:14px; margin-top:8px;"><b>Impact:</b> {row['Impact']} &nbsp; | &nbsp; <b>Confidence:</b> {row['Confidence']}</div>
+                    <div style="font-size:13px; margin-top:6px; color:#475569;"><b>Trigger:</b> {row['Trigger']}</div>
+                    <div style="font-size:13px; margin-top:6px; color:#334155;"><b>Action:</b> {row['Action']}</div>
+                </div>
+                """, unsafe_allow_html=True)
+    st.dataframe(sep_risks, use_container_width=True, hide_index=True)
+
+with v4tab4:
+    st.markdown("### Board Presentation Mode")
+    st.caption("Gunakan tabel ini sebagai alur presentasi Direksi tanpa perlu membuat PowerPoint terpisah.")
+    st.dataframe(sep_flow, use_container_width=True, hide_index=True)
+    flow_counts = sep_flow.copy()
+    flow_counts["Duration_Minutes"] = [3, 4, 4, 5, 5, 5, 4]
+    fig = px.bar(flow_counts, x="Slide", y="Duration_Minutes", text="Title", title="Suggested Board Presentation Flow")
+    fig.update_layout(height=360, margin=dict(l=10, r=10, t=45, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+with v4tab5:
+    st.markdown("### Executive Pack")
+    st.info(executive_closing_text(latest, bp, mq, mh, cr, targets, currency))
+    ep1, ep2, ep3 = st.columns(3)
+    with ep1:
+        st.metric("Company Health", f"{sep_health['score']}/100", sep_health["label"])
+    with ep2:
+        st.metric("Board Decision", board_score["label"], f"{board_score['score']}/100")
+    with ep3:
+        st.metric("Top Risk", sep_risks.sort_values(["Impact", "Probability"], ascending=False).iloc[0]["Risk"])
+    st.markdown("#### Board-ready Final Message")
+    st.success("SEP V4 merekomendasikan agar keputusan manpower tidak dilakukan secara general. Tambahan HC hanya dilakukan untuk fungsi yang terbukti memiliki revenue leverage, capacity bottleneck, backlog, atau SLA pressure. Fokus utama adalah menjaga MCR sehat, meningkatkan RPE, memperbaiki margin quality, dan menurunkan capacity risk secara bertahap.")
+
+
+# =========================
+# DATA QUALITY
+# =========================
+with st.expander("🔍 Data Quality & Raw Tables"):
+    st.write("Required sheets loaded:", ", ".join(REQUIRED_SHEETS))
+    st.write("Available sheets loaded:", ", ".join(sheets.keys()))
+    st.markdown("#### Yearly KPI")
+    st.dataframe(yr, use_container_width=True, hide_index=True)
+    st.markdown("#### Department")
+    st.dataframe(data["dept"], use_container_width=True, hide_index=True)
+
+st.divider()
+st.caption("Starcom Executive Platform (SEP) V4 — Executive Intelligence Edition. Interpretasi MCR harus selalu dibaca bersama Revenue Growth, RPE, Headcount, Margin Quality, dan Capacity Risk.")
